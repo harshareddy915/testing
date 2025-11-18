@@ -1,0 +1,315 @@
+pipeline:
+  name: Module Registry with Testing and Rollback
+  identifier: module_registry_testing_pipeline
+  projectIdentifier: <+input>
+  orgIdentifier: <+input>
+  tags: {}
+  stages:
+    - stage:
+        name: Create Module in Registry
+        identifier: create_module_registry
+        description: Create new module version in Harness Module Registry
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: ShellScript
+                  name: Create Module Registry Entry
+                  identifier: create_module_entry
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          set -e
+                          
+                          # Variables
+                          MODULE_NAME="<+pipeline.variables.moduleName>"
+                          MODULE_VERSION="<+pipeline.variables.moduleVersion>"
+                          MODULE_DESCRIPTION="<+pipeline.variables.moduleDescription>"
+                          REGISTRY_URL="<+pipeline.variables.registryUrl>"
+                          HARNESS_ACCOUNT_ID="<+account.identifier>"
+                          HARNESS_ORG_ID="<+org.identifier>"
+                          HARNESS_PROJECT_ID="<+project.identifier>"
+                          
+                          echo "Creating module: ${MODULE_NAME} version: ${MODULE_VERSION}"
+                          
+                          # Create module using Harness API
+                          response=$(curl -X POST "${REGISTRY_URL}/v1/orgs/${HARNESS_ORG_ID}/projects/${HARNESS_PROJECT_ID}/modules" \
+                            -H "Content-Type: application/json" \
+                            -H "x-api-key: <+secrets.getValue('harness_api_key')>" \
+                            -d '{
+                              "name": "'"${MODULE_NAME}"'",
+                              "version": "'"${MODULE_VERSION}"'",
+                              "description": "'"${MODULE_DESCRIPTION}"'",
+                              "source": "<+pipeline.variables.moduleSource>",
+                              "type": "<+pipeline.variables.moduleType>"
+                            }' -w "\n%{http_code}" -s)
+                          
+                          http_code=$(echo "$response" | tail -n1)
+                          body=$(echo "$response" | sed '$d')
+                          
+                          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+                            echo "Module created successfully"
+                            module_id=$(echo "$body" | jq -r '.data.id')
+                            echo "Module ID: ${module_id}"
+                            
+                            # Export module ID for rollback
+                            echo "export MODULE_ID=${module_id}" > /tmp/module_context.sh
+                            echo "export MODULE_NAME=${MODULE_NAME}" >> /tmp/module_context.sh
+                            echo "export MODULE_VERSION=${MODULE_VERSION}" >> /tmp/module_context.sh
+                          else
+                            echo "Failed to create module. HTTP Code: ${http_code}"
+                            echo "Response: ${body}"
+                            exit 1
+                          fi
+                    environmentVariables: []
+                    outputVariables:
+                      - name: MODULE_ID
+                        type: String
+                        value: module_id
+                  timeout: 5m
+                  failureStrategies: []
+              
+              - step:
+                  type: ShellScript
+                  name: Publish Module Artifacts
+                  identifier: publish_module_artifacts
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          set -e
+                          
+                          # Load module context
+                          source /tmp/module_context.sh
+                          
+                          echo "Publishing artifacts for module: ${MODULE_NAME}"
+                          
+                          # Upload module artifacts (Terraform, scripts, etc.)
+                          # This is an example - adjust based on your module type
+                          tar -czf /tmp/module-${MODULE_VERSION}.tar.gz <+pipeline.variables.modulePath>
+                          
+                          # Upload to registry
+                          curl -X POST "${REGISTRY_URL}/v1/modules/${MODULE_ID}/artifacts" \
+                            -H "x-api-key: <+secrets.getValue('harness_api_key')>" \
+                            -F "file=@/tmp/module-${MODULE_VERSION}.tar.gz" \
+                            -w "\n%{http_code}" -s
+                          
+                          echo "Artifacts published successfully"
+                    environmentVariables: []
+                    outputVariables: []
+                  timeout: 10m
+        tags: {}
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: StageRollback
+    
+    - stage:
+        name: Run Module Testing Pipeline
+        identifier: run_testing_pipeline
+        description: Execute testing pipeline for the newly created module
+        type: Pipeline
+        spec:
+          org: <+org.identifier>
+          pipeline: <+pipeline.variables.testingPipelineId>
+          project: <+project.identifier>
+          inputs:
+            identifier: <+pipeline.variables.testingPipelineId>
+            stages:
+              - stage:
+                  identifier: test_stage
+                  type: Custom
+                  variables:
+                    - name: module_name
+                      type: String
+                      value: <+pipeline.stages.create_module_registry.spec.execution.steps.create_module_entry.output.outputVariables.MODULE_ID>
+                    - name: module_version
+                      type: String
+                      value: <+pipeline.variables.moduleVersion>
+        tags: {}
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: StageRollback
+        when:
+          pipelineStatus: Success
+          condition: <+pipeline.stages.create_module_registry.status> == "Success"
+    
+    - stage:
+        name: Rollback Module Registry
+        identifier: rollback_module_registry
+        description: Revert module registry changes if testing fails
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: ShellScript
+                  name: Delete Module from Registry
+                  identifier: delete_module_registry
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          set -e
+                          
+                          # Load module context
+                          if [ -f /tmp/module_context.sh ]; then
+                            source /tmp/module_context.sh
+                          else
+                            echo "Module context not found. Cannot rollback."
+                            exit 1
+                          fi
+                          
+                          REGISTRY_URL="<+pipeline.variables.registryUrl>"
+                          HARNESS_ORG_ID="<+org.identifier>"
+                          HARNESS_PROJECT_ID="<+project.identifier>"
+                          
+                          echo "Rolling back module: ${MODULE_NAME} (ID: ${MODULE_ID})"
+                          
+                          # Delete module from registry
+                          response=$(curl -X DELETE \
+                            "${REGISTRY_URL}/v1/orgs/${HARNESS_ORG_ID}/projects/${HARNESS_PROJECT_ID}/modules/${MODULE_ID}" \
+                            -H "x-api-key: <+secrets.getValue('harness_api_key')>" \
+                            -w "\n%{http_code}" -s)
+                          
+                          http_code=$(echo "$response" | tail -n1)
+                          
+                          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+                            echo "Module ${MODULE_NAME} (version ${MODULE_VERSION}) successfully deleted from registry"
+                            echo "Rollback completed successfully"
+                          else
+                            echo "Failed to delete module. HTTP Code: ${http_code}"
+                            echo "Manual intervention may be required"
+                            exit 1
+                          fi
+                          
+                          # Cleanup
+                          rm -f /tmp/module_context.sh
+                          rm -f /tmp/module-${MODULE_VERSION}.tar.gz
+                    environmentVariables: []
+                    outputVariables: []
+                  timeout: 5m
+              
+              - step:
+                  type: ShellScript
+                  name: Send Rollback Notification
+                  identifier: send_rollback_notification
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          
+                          MODULE_NAME="<+pipeline.variables.moduleName>"
+                          MODULE_VERSION="<+pipeline.variables.moduleVersion>"
+                          PIPELINE_URL="<+pipeline.executionUrl>"
+                          
+                          echo "Sending rollback notification..."
+                          
+                          # Send notification (adjust to your notification system)
+                          curl -X POST "<+pipeline.variables.notificationWebhook>" \
+                            -H "Content-Type: application/json" \
+                            -d '{
+                              "text": "⚠️ Module Registry Rollback",
+                              "attachments": [{
+                                "color": "warning",
+                                "fields": [
+                                  {"title": "Module", "value": "'"${MODULE_NAME}"'", "short": true},
+                                  {"title": "Version", "value": "'"${MODULE_VERSION}"'", "short": true},
+                                  {"title": "Status", "value": "Testing failed - module removed from registry", "short": false},
+                                  {"title": "Pipeline", "value": "'"${PIPELINE_URL}"'", "short": false}
+                                ]
+                              }]
+                            }'
+                          
+                          echo "Notification sent"
+                    environmentVariables: []
+                    outputVariables: []
+                  timeout: 2m
+        tags: {}
+        when:
+          pipelineStatus: Failure
+          condition: <+pipeline.stages.run_testing_pipeline.status> == "Failed"
+  
+  variables:
+    - name: moduleName
+      type: String
+      description: Name of the module to create
+      required: true
+      value: <+input>
+    - name: moduleVersion
+      type: String
+      description: Version of the module (e.g., 1.0.0)
+      required: true
+      value: <+input>
+    - name: moduleDescription
+      type: String
+      description: Description of the module
+      required: false
+      value: <+input>.default("New module version").allowedValues()
+    - name: moduleSource
+      type: String
+      description: Source repository URL
+      required: true
+      value: <+input>
+    - name: moduleType
+      type: String
+      description: Type of module (terraform, script, etc.)
+      required: true
+      value: <+input>.allowedValues(terraform,script,helm,kubernetes)
+    - name: modulePath
+      type: String
+      description: Local path to module files
+      required: true
+      value: <+input>
+    - name: registryUrl
+      type: String
+      description: Harness Module Registry API URL
+      required: true
+      value: https://app.harness.io/gateway/iacm
+    - name: testingPipelineId
+      type: String
+      description: Identifier of the testing pipeline to execute
+      required: true
+      value: <+input>
+    - name: notificationWebhook
+      type: String
+      description: Webhook URL for notifications
+      required: false
+      value: <+input>
+  
+  notificationRules:
+    - name: Pipeline Failure Notification
+      identifier: pipeline_failure_notification
+      pipelineEvents:
+        - type: PipelineFailed
+      notificationMethod:
+        type: Email
+        spec:
+          userGroups:
+            - account._account_all_users
+          recipients:
+            - <+pipeline.triggeredBy.email>
+      enabled: true

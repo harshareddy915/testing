@@ -1,0 +1,628 @@
+pipeline:
+  name: IACM Module Registry with Advanced Testing
+  identifier: iacm_module_registry_advanced
+  projectIdentifier: <+input>
+  orgIdentifier: <+input>
+  tags:
+    category: iacm
+    automation: module-registry
+  stages:
+    - stage:
+        name: Prepare Module
+        identifier: prepare_module
+        type: CI
+        spec:
+          cloneCodebase: true
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: Validate Module Structure
+                  identifier: validate_module
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: hashicorp/terraform:latest
+                    shell: Sh
+                    command: |-
+                      echo "Validating Terraform module structure..."
+                      
+                      # Check for required files
+                      if [ ! -f "main.tf" ]; then
+                        echo "Error: main.tf not found"
+                        exit 1
+                      fi
+                      
+                      # Initialize and validate
+                      terraform init -backend=false
+                      terraform validate
+                      
+                      # Check formatting
+                      terraform fmt -check -recursive
+                      
+                      echo "Module structure validation passed"
+              
+              - step:
+                  type: Run
+                  name: Run Security Scan
+                  identifier: security_scan
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: bridgecrew/checkov:latest
+                    shell: Sh
+                    command: |-
+                      echo "Running security scan with Checkov..."
+                      
+                      checkov -d . --framework terraform \
+                        --output cli --output junitxml \
+                        --output-file-path /harness/checkov-results.xml
+                      
+                      echo "Security scan completed"
+              
+              - step:
+                  type: Run
+                  name: Package Module
+                  identifier: package_module
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: alpine:latest
+                    shell: Sh
+                    command: |-
+                      echo "Packaging module..."
+                      
+                      # Create version file
+                      cat > VERSION << EOF
+                      MODULE_VERSION=<+pipeline.variables.moduleVersion>
+                      MODULE_NAME=<+pipeline.variables.moduleName>
+                      BUILD_ID=<+pipeline.executionId>
+                      BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+                      EOF
+                      
+                      # Create tarball
+                      tar -czf /harness/module-<+pipeline.variables.moduleVersion>.tar.gz \
+                        --exclude='.git' \
+                        --exclude='.terraform' \
+                        --exclude='*.tfstate*' \
+                        .
+                      
+                      echo "Module packaged successfully"
+                    resources:
+                      limits:
+                        memory: 1Gi
+                        cpu: 1000m
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: Abort
+    
+    - stage:
+        name: Register Module
+        identifier: register_module
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: Http
+                  name: Create Module Version
+                  identifier: create_module_version
+                  spec:
+                    url: <+pipeline.variables.registryUrl>/v1/orgs/<+org.identifier>/projects/<+project.identifier>/module-registry/modules
+                    method: POST
+                    headers:
+                      - key: Content-Type
+                        value: application/json
+                      - key: x-api-key
+                        value: <+secrets.getValue("harness_api_key")>
+                    requestBody: |-
+                      {
+                        "name": "<+pipeline.variables.moduleName>",
+                        "version": "<+pipeline.variables.moduleVersion>",
+                        "description": "<+pipeline.variables.moduleDescription>",
+                        "provider": "<+pipeline.variables.moduleProvider>",
+                        "source": {
+                          "type": "git",
+                          "url": "<+codebase.repoUrl>",
+                          "ref": "<+codebase.branch>",
+                          "path": "<+pipeline.variables.modulePath>"
+                        },
+                        "metadata": {
+                          "buildId": "<+pipeline.executionId>",
+                          "triggeredBy": "<+pipeline.triggeredBy.email>",
+                          "buildTime": "<+pipeline.startTs>"
+                        }
+                      }
+                    assertion: <+httpResponseCode> == 201
+                    outputVariables:
+                      - name: moduleId
+                        type: String
+                        value: <+json.object(httpResponseBody).data.id>
+                      - name: moduleUrl
+                        type: String
+                        value: <+json.object(httpResponseBody).data.url>
+                  timeout: 30s
+                  failureStrategies:
+                    - onFailure:
+                        errors:
+                          - AllErrors
+                        action:
+                          type: Abort
+              
+              - step:
+                  type: ShellScript
+                  name: Upload Module Artifacts
+                  identifier: upload_artifacts
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          set -e
+                          
+                          MODULE_ID="<+pipeline.stages.register_module.spec.execution.steps.create_module_version.output.outputVariables.moduleId>"
+                          REGISTRY_URL="<+pipeline.variables.registryUrl>"
+                          
+                          echo "Uploading artifacts for module ID: ${MODULE_ID}"
+                          
+                          # Upload the packaged module
+                          response=$(curl -X POST \
+                            "${REGISTRY_URL}/v1/modules/${MODULE_ID}/artifacts" \
+                            -H "x-api-key: <+secrets.getValue('harness_api_key')>" \
+                            -F "artifact=@/harness/module-<+pipeline.variables.moduleVersion>.tar.gz" \
+                            -F "type=module" \
+                            -w "\n%{http_code}" -s)
+                          
+                          http_code=$(echo "$response" | tail -n1)
+                          
+                          if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
+                            echo "✓ Artifacts uploaded successfully"
+                          else
+                            echo "✗ Failed to upload artifacts. HTTP: ${http_code}"
+                            exit 1
+                          fi
+                          
+                          # Save module context for potential rollback
+                          cat > /tmp/module_registry_context.json << EOF
+                          {
+                            "moduleId": "${MODULE_ID}",
+                            "moduleName": "<+pipeline.variables.moduleName>",
+                            "moduleVersion": "<+pipeline.variables.moduleVersion>",
+                            "registryUrl": "${REGISTRY_URL}",
+                            "createdAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+                            "pipelineId": "<+pipeline.executionId>"
+                          }
+                          EOF
+                    environmentVariables: []
+                    outputVariables:
+                      - name: uploadStatus
+                        type: String
+                        value: uploadStatus
+                  timeout: 10m
+              
+              - step:
+                  type: Http
+                  name: Publish Module
+                  identifier: publish_module
+                  spec:
+                    url: <+pipeline.variables.registryUrl>/v1/modules/<+pipeline.stages.register_module.spec.execution.steps.create_module_version.output.outputVariables.moduleId>/publish
+                    method: POST
+                    headers:
+                      - key: x-api-key
+                        value: <+secrets.getValue("harness_api_key")>
+                    requestBody: |-
+                      {
+                        "status": "published",
+                        "visibility": "<+pipeline.variables.moduleVisibility>"
+                      }
+                    assertion: <+httpResponseCode> == 200
+                  timeout: 30s
+        tags: {}
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: StageRollback
+    
+    - stage:
+        name: Create Test Workspace
+        identifier: create_test_workspace
+        type: IACM
+        spec:
+          workspace: test_workspace_<+pipeline.variables.moduleName>_<+pipeline.sequenceId>
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: IACMTerraformPlugin
+                  name: Initialize with New Module
+                  identifier: init_with_module
+                  spec:
+                    command: init
+                    config:
+                      type: Inline
+                      spec:
+                        content: |-
+                          terraform {
+                            required_version = ">= 1.0"
+                          }
+                          
+                          module "test_module" {
+                            source  = "<+pipeline.stages.register_module.spec.execution.steps.create_module_version.output.outputVariables.moduleUrl>"
+                            version = "<+pipeline.variables.moduleVersion>"
+                            
+                            # Test variables
+                            <+pipeline.variables.testModuleInputs>
+                          }
+                          
+                          output "module_outputs" {
+                            value = module.test_module
+                          }
+                    provisionerIdentifier: <+pipeline.variables.moduleName>_test
+              
+              - step:
+                  type: IACMTerraformPlugin
+                  name: Plan Test Deployment
+                  identifier: plan_test
+                  spec:
+                    command: plan
+                    config:
+                      type: Inline
+                      spec:
+                        content: ""
+                    provisionerIdentifier: <+pipeline.variables.moduleName>_test
+              
+              - step:
+                  type: IACMTerraformPlugin
+                  name: Apply Test Deployment
+                  identifier: apply_test
+                  spec:
+                    command: apply
+                    config:
+                      type: Inline
+                      spec:
+                        content: ""
+                    provisionerIdentifier: <+pipeline.variables.moduleName>_test
+              
+              - step:
+                  type: ShellScript
+                  name: Run Integration Tests
+                  identifier: run_integration_tests
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          set -e
+                          
+                          echo "Running integration tests..."
+                          
+                          # Parse Terraform outputs
+                          terraform output -json > /tmp/outputs.json
+                          
+                          # Run custom tests based on module type
+                          <+pipeline.variables.customTestScript>
+                          
+                          echo "✓ All integration tests passed"
+                    environmentVariables: []
+                  timeout: 15m
+              
+              - step:
+                  type: IACMTerraformPlugin
+                  name: Destroy Test Resources
+                  identifier: destroy_test
+                  spec:
+                    command: destroy
+                    config:
+                      type: Inline
+                      spec:
+                        content: ""
+                    provisionerIdentifier: <+pipeline.variables.moduleName>_test
+        when:
+          pipelineStatus: Success
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: MarkAsFailure
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: StageRollback
+    
+    - stage:
+        name: Validation Tests
+        identifier: validation_tests
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: ShellScript
+                  name: Validate Module Registry Entry
+                  identifier: validate_registry_entry
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          set -e
+                          
+                          MODULE_ID="<+pipeline.stages.register_module.spec.execution.steps.create_module_version.output.outputVariables.moduleId>"
+                          REGISTRY_URL="<+pipeline.variables.registryUrl>"
+                          
+                          echo "Validating module registry entry..."
+                          
+                          # Get module details
+                          response=$(curl -X GET \
+                            "${REGISTRY_URL}/v1/modules/${MODULE_ID}" \
+                            -H "x-api-key: <+secrets.getValue('harness_api_key')>" \
+                            -s)
+                          
+                          # Validate response
+                          status=$(echo "$response" | jq -r '.data.status')
+                          version=$(echo "$response" | jq -r '.data.version')
+                          
+                          if [ "$status" != "published" ]; then
+                            echo "✗ Module status is not published: ${status}"
+                            exit 1
+                          fi
+                          
+                          if [ "$version" != "<+pipeline.variables.moduleVersion>" ]; then
+                            echo "✗ Version mismatch: ${version}"
+                            exit 1
+                          fi
+                          
+                          echo "✓ Module registry entry validated successfully"
+                    environmentVariables: []
+                  timeout: 5m
+              
+              - step:
+                  type: ShellScript
+                  name: Run Module Compatibility Tests
+                  identifier: compatibility_tests
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          set -e
+                          
+                          echo "Running compatibility tests..."
+                          
+                          # Test with different Terraform versions
+                          for version in "1.5.0" "1.6.0" "latest"; do
+                            echo "Testing with Terraform ${version}..."
+                            docker run --rm -v $(pwd):/workspace hashicorp/terraform:${version} \
+                              -chdir=/workspace init -backend=false
+                            docker run --rm -v $(pwd):/workspace hashicorp/terraform:${version} \
+                              -chdir=/workspace validate
+                          done
+                          
+                          echo "✓ Compatibility tests passed"
+                    environmentVariables: []
+                  timeout: 10m
+        when:
+          pipelineStatus: Success
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: MarkAsFailure
+    
+    - stage:
+        name: Rollback Module Registry
+        identifier: rollback_registry
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: ShellScript
+                  name: Load Rollback Context
+                  identifier: load_context
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          
+                          if [ ! -f /tmp/module_registry_context.json ]; then
+                            echo "⚠️  Module context not found - attempting to use pipeline variables"
+                            MODULE_ID="<+pipeline.stages.register_module.spec.execution.steps.create_module_version.output.outputVariables.moduleId>"
+                          else
+                            MODULE_ID=$(jq -r '.moduleId' /tmp/module_registry_context.json)
+                          fi
+                          
+                          echo "Module ID for rollback: ${MODULE_ID}"
+                    environmentVariables: []
+                    outputVariables:
+                      - name: rollbackModuleId
+                        type: String
+                        value: MODULE_ID
+                  timeout: 1m
+              
+              - step:
+                  type: Http
+                  name: Unpublish Module
+                  identifier: unpublish_module
+                  spec:
+                    url: <+pipeline.variables.registryUrl>/v1/modules/<+pipeline.stages.rollback_registry.spec.execution.steps.load_context.output.outputVariables.rollbackModuleId>/unpublish
+                    method: POST
+                    headers:
+                      - key: x-api-key
+                        value: <+secrets.getValue("harness_api_key")>
+                    requestBody: |-
+                      {
+                        "status": "unpublished",
+                        "reason": "Testing failed - rolling back"
+                      }
+                    assertion: <+httpResponseCode> == 200
+                  timeout: 30s
+                  when:
+                    stageStatus: All
+              
+              - step:
+                  type: Http
+                  name: Delete Module Version
+                  identifier: delete_module
+                  spec:
+                    url: <+pipeline.variables.registryUrl>/v1/modules/<+pipeline.stages.rollback_registry.spec.execution.steps.load_context.output.outputVariables.rollbackModuleId>
+                    method: DELETE
+                    headers:
+                      - key: x-api-key
+                        value: <+secrets.getValue("harness_api_key")>
+                    assertion: <+httpResponseCode> == 204 || <+httpResponseCode> == 200
+                  timeout: 30s
+              
+              - step:
+                  type: ShellScript
+                  name: Cleanup and Notify
+                  identifier: cleanup_notify
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          
+                          MODULE_NAME="<+pipeline.variables.moduleName>"
+                          MODULE_VERSION="<+pipeline.variables.moduleVersion>"
+                          FAILED_STAGE="<+pipeline.stages.create_test_workspace.status>"
+                          
+                          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                          echo "  ROLLBACK COMPLETED"
+                          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                          echo "Module: ${MODULE_NAME}"
+                          echo "Version: ${MODULE_VERSION}"
+                          echo "Reason: Testing stage failed"
+                          echo "Pipeline: <+pipeline.executionUrl>"
+                          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                          
+                          # Cleanup temporary files
+                          rm -f /tmp/module_registry_context.json
+                          rm -f /harness/module-*.tar.gz
+                          
+                          # Send notification
+                          if [ -n "<+pipeline.variables.slackWebhook>" ]; then
+                            curl -X POST "<+pipeline.variables.slackWebhook>" \
+                              -H "Content-Type: application/json" \
+                              -d '{
+                                "blocks": [
+                                  {
+                                    "type": "header",
+                                    "text": {
+                                      "type": "plain_text",
+                                      "text": "⚠️ Module Registry Rollback",
+                                      "emoji": true
+                                    }
+                                  },
+                                  {
+                                    "type": "section",
+                                    "fields": [
+                                      {"type": "mrkdwn", "text": "*Module:*\n'"${MODULE_NAME}"'"},
+                                      {"type": "mrkdwn", "text": "*Version:*\n'"${MODULE_VERSION}"'"},
+                                      {"type": "mrkdwn", "text": "*Status:*\nRemoved from registry"},
+                                      {"type": "mrkdwn", "text": "*Pipeline:*\n<+pipeline.executionUrl>"}
+                                    ]
+                                  }
+                                ]
+                              }'
+                          fi
+                    environmentVariables: []
+                  timeout: 5m
+        tags: {}
+        when:
+          pipelineStatus: Failure
+          condition: <+pipeline.stages.create_test_workspace.status> == "Failed" || <+pipeline.stages.validation_tests.status> == "Failed"
+  
+  variables:
+    - name: moduleName
+      type: String
+      description: Name of the module
+      required: true
+      value: <+input>.regex([a-z0-9-_]+)
+    - name: moduleVersion
+      type: String
+      description: Semantic version (e.g., 1.0.0)
+      required: true
+      value: <+input>.regex(^\d+\.\d+\.\d+$)
+    - name: moduleDescription
+      type: String
+      description: Module description
+      required: true
+      value: <+input>
+    - name: moduleProvider
+      type: String
+      description: Cloud provider
+      required: true
+      value: <+input>.allowedValues(aws,azure,gcp,kubernetes,generic)
+    - name: modulePath
+      type: String
+      description: Path in repository
+      required: false
+      value: <+input>.default(".")
+    - name: moduleVisibility
+      type: String
+      description: Module visibility
+      required: true
+      value: <+input>.allowedValues(private,organization,public).default(private)
+    - name: registryUrl
+      type: String
+      description: Registry API endpoint
+      required: true
+      value: https://app.harness.io/gateway/iacm
+    - name: testModuleInputs
+      type: String
+      description: Test input variables for module
+      required: false
+      value: <+input>.executionInput()
+    - name: customTestScript
+      type: String
+      description: Custom test commands
+      required: false
+      value: <+input>.default("echo 'No custom tests defined'")
+    - name: slackWebhook
+      type: String
+      description: Slack webhook for notifications
+      required: false
+      value: <+input>.executionInput()
+  
+  properties:
+    ci:
+      codebase:
+        connectorRef: <+input>
+        repoName: <+input>
+        build: <+input>
