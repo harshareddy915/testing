@@ -1,0 +1,145 @@
+pipeline:
+  name: Node App Build and S3 Upload
+  identifier: node_app_build_s3
+  projectIdentifier: default
+  orgIdentifier: default
+  tags: {}
+  properties:
+    ci:
+      codebase:
+        connectorRef: account.Github
+        repoName: <+input>
+        build: <+input>
+  stages:
+    - stage:
+        name: Build and Package
+        identifier: build_and_package
+        description: Build Node.js application and upload to S3
+        type: CI
+        spec:
+          cloneCodebase: true
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: Install Dependencies
+                  identifier: install_dependencies
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: node:18-alpine
+                    shell: Sh
+                    command: |-
+                      echo "Installing npm dependencies..."
+                      npm ci
+                      echo "Dependencies installed successfully"
+                    
+              - step:
+                  type: Run
+                  name: Run Tests
+                  identifier: run_tests
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: node:18-alpine
+                    shell: Sh
+                    command: |-
+                      echo "Running tests..."
+                      npm test
+                    optional: true
+                    
+              - step:
+                  type: Run
+                  name: Build Application
+                  identifier: build_application
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: node:18-alpine
+                    shell: Sh
+                    command: |-
+                      echo "Building application..."
+                      npm run build
+                      echo "Build completed successfully"
+                    
+              - step:
+                  type: Run
+                  name: Package Application
+                  identifier: package_application
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: node:18-alpine
+                    shell: Sh
+                    command: |-
+                      echo "Creating package archive..."
+                      
+                      # Create a timestamped package name
+                      TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                      PACKAGE_NAME="node-app-${TIMESTAMP}.tar.gz"
+                      
+                      # Package the build artifacts (adjust paths as needed)
+                      tar -czf ${PACKAGE_NAME} \
+                        --exclude='node_modules' \
+                        --exclude='.git' \
+                        --exclude='*.log' \
+                        package.json \
+                        package-lock.json \
+                        dist/ \
+                        node_modules/
+                      
+                      echo "Package created: ${PACKAGE_NAME}"
+                      
+                      # Export package name for next step
+                      echo "PACKAGE_NAME=${PACKAGE_NAME}" >> $HARNESS_ENV
+                    
+              - step:
+                  type: Run
+                  name: Upload to S3
+                  identifier: upload_to_s3
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: amazon/aws-cli:latest
+                    shell: Sh
+                    envVariables:
+                      AWS_ACCESS_KEY_ID: <+secrets.getValue("aws_access_key_id")>
+                      AWS_SECRET_ACCESS_KEY: <+secrets.getValue("aws_secret_access_key")>
+                      AWS_DEFAULT_REGION: us-east-1
+                      S3_BUCKET: <+pipeline.variables.s3_bucket>
+                    command: |-
+                      echo "Uploading package to S3..."
+                      
+                      # Upload the package to S3
+                      aws s3 cp ${PACKAGE_NAME} s3://${S3_BUCKET}/builds/${PACKAGE_NAME}
+                      
+                      # Optional: Also upload as "latest" for easy reference
+                      aws s3 cp ${PACKAGE_NAME} s3://${S3_BUCKET}/builds/node-app-latest.tar.gz
+                      
+                      echo "Upload completed successfully"
+                      echo "S3 Location: s3://${S3_BUCKET}/builds/${PACKAGE_NAME}"
+                      
+              - step:
+                  type: Run
+                  name: Cleanup
+                  identifier: cleanup
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: node:18-alpine
+                    shell: Sh
+                    command: |-
+                      echo "Cleaning up temporary files..."
+                      rm -f *.tar.gz
+                      echo "Cleanup completed"
+                    optional: true
+                    
+          sharedPaths:
+            - /harness
+            
+  variables:
+    - name: s3_bucket
+      type: String
+      description: S3 bucket name for storing build artifacts
+      required: true
+      value: <+input>

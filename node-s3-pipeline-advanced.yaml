@@ -1,0 +1,339 @@
+pipeline:
+  name: Node App Build S3 Advanced
+  identifier: node_app_build_s3_advanced
+  projectIdentifier: default
+  orgIdentifier: default
+  tags:
+    app: nodejs
+    deployment: s3
+  properties:
+    ci:
+      codebase:
+        connectorRef: account.Github
+        repoName: <+input>
+        build: <+input>
+  stages:
+    - stage:
+        name: Build Package Deploy
+        identifier: build_package_deploy
+        description: Complete CI workflow for Node.js app
+        type: CI
+        spec:
+          cloneCodebase: true
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: Setup Environment
+                  identifier: setup_environment
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: node:18-alpine
+                    shell: Sh
+                    command: |-
+                      echo "=== Environment Setup ==="
+                      node --version
+                      npm --version
+                      echo "Git Branch: <+codebase.branch>"
+                      echo "Git Commit: <+codebase.commitSha>"
+                      echo "Build Number: <+pipeline.sequenceId>"
+                      
+              - step:
+                  type: Run
+                  name: Install Dependencies
+                  identifier: install_dependencies
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: node:18-alpine
+                    shell: Sh
+                    command: |-
+                      echo "=== Installing Dependencies ==="
+                      
+                      # Use npm ci for faster, more reliable installs
+                      npm ci --production=false
+                      
+                      echo "Dependencies installed successfully"
+                      
+                      # Cache node_modules for faster subsequent builds
+                      du -sh node_modules
+                    
+              - step:
+                  type: Run
+                  name: Lint Code
+                  identifier: lint_code
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: node:18-alpine
+                    shell: Sh
+                    command: |-
+                      echo "=== Running Linter ==="
+                      
+                      if [ -f "package.json" ] && grep -q "\"lint\":" package.json; then
+                        npm run lint
+                      else
+                        echo "No lint script found, skipping..."
+                      fi
+                    optional: true
+                    
+              - step:
+                  type: Run
+                  name: Run Unit Tests
+                  identifier: run_unit_tests
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: node:18-alpine
+                    shell: Sh
+                    command: |-
+                      echo "=== Running Unit Tests ==="
+                      
+                      if [ -f "package.json" ] && grep -q "\"test\":" package.json; then
+                        npm test -- --coverage
+                      else
+                        echo "No test script found, skipping..."
+                      fi
+                    optional: true
+                    
+              - step:
+                  type: Run
+                  name: Build Application
+                  identifier: build_application
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: node:18-alpine
+                    shell: Sh
+                    command: |-
+                      echo "=== Building Application ==="
+                      
+                      # Set NODE_ENV for production build
+                      export NODE_ENV=production
+                      
+                      # Run build script
+                      npm run build
+                      
+                      echo "Build completed successfully"
+                      
+                      # Verify build output
+                      if [ -d "dist" ]; then
+                        echo "Build artifacts found in dist/"
+                        ls -lh dist/
+                      elif [ -d "build" ]; then
+                        echo "Build artifacts found in build/"
+                        ls -lh build/
+                      fi
+                    
+              - step:
+                  type: Run
+                  name: Create Package Archive
+                  identifier: create_package
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: node:18-alpine
+                    shell: Sh
+                    command: |-
+                      echo "=== Creating Package Archive ==="
+                      
+                      # Generate package name with metadata
+                      APP_NAME="<+pipeline.variables.app_name>"
+                      BRANCH="<+codebase.branch>"
+                      COMMIT_SHA="<+codebase.commitSha>"
+                      SHORT_SHA="${COMMIT_SHA:0:8}"
+                      BUILD_NUM="<+pipeline.sequenceId>"
+                      TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                      
+                      PACKAGE_NAME="${APP_NAME}-${BRANCH}-${SHORT_SHA}-build${BUILD_NUM}.tar.gz"
+                      
+                      echo "Package name: ${PACKAGE_NAME}"
+                      
+                      # Install production dependencies only
+                      npm ci --production
+                      
+                      # Create package with necessary files
+                      tar -czf ${PACKAGE_NAME} \
+                        --exclude='*.log' \
+                        --exclude='.git' \
+                        --exclude='tests' \
+                        --exclude='coverage' \
+                        package.json \
+                        package-lock.json \
+                        node_modules \
+                        dist 2>/dev/null || \
+                      tar -czf ${PACKAGE_NAME} \
+                        --exclude='*.log' \
+                        --exclude='.git' \
+                        --exclude='tests' \
+                        --exclude='coverage' \
+                        package.json \
+                        package-lock.json \
+                        node_modules \
+                        build
+                      
+                      # Get package size
+                      PACKAGE_SIZE=$(du -h ${PACKAGE_NAME} | cut -f1)
+                      echo "Package size: ${PACKAGE_SIZE}"
+                      
+                      # Export variables for next steps
+                      echo "PACKAGE_NAME=${PACKAGE_NAME}" >> $HARNESS_ENV
+                      echo "PACKAGE_SIZE=${PACKAGE_SIZE}" >> $HARNESS_ENV
+                      echo "SHORT_SHA=${SHORT_SHA}" >> $HARNESS_ENV
+                      
+              - step:
+                  type: Run
+                  name: Generate Metadata
+                  identifier: generate_metadata
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: node:18-alpine
+                    shell: Sh
+                    command: |-
+                      echo "=== Generating Metadata ==="
+                      
+                      # Create metadata JSON file
+                      cat > metadata.json <<EOF
+                      {
+                        "application": "<+pipeline.variables.app_name>",
+                        "version": "$(node -p "require('./package.json').version")",
+                        "branch": "<+codebase.branch>",
+                        "commit": "<+codebase.commitSha>",
+                        "buildNumber": "<+pipeline.sequenceId>",
+                        "buildTime": "$(date -Iseconds)",
+                        "packageName": "${PACKAGE_NAME}",
+                        "packageSize": "${PACKAGE_SIZE}",
+                        "nodeVersion": "$(node --version)",
+                        "npmVersion": "$(npm --version)"
+                      }
+                      EOF
+                      
+                      cat metadata.json
+                      
+              - step:
+                  type: Run
+                  name: Upload to S3
+                  identifier: upload_to_s3
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: amazon/aws-cli:latest
+                    shell: Sh
+                    envVariables:
+                      AWS_ACCESS_KEY_ID: <+secrets.getValue("aws_access_key_id")>
+                      AWS_SECRET_ACCESS_KEY: <+secrets.getValue("aws_secret_access_key")>
+                      AWS_DEFAULT_REGION: <+pipeline.variables.aws_region>
+                      S3_BUCKET: <+pipeline.variables.s3_bucket>
+                      S3_PREFIX: <+pipeline.variables.s3_prefix>
+                      ENVIRONMENT: <+pipeline.variables.environment>
+                    command: |-
+                      echo "=== Uploading to S3 ==="
+                      
+                      BRANCH="<+codebase.branch>"
+                      S3_PATH="s3://${S3_BUCKET}/${S3_PREFIX}/${ENVIRONMENT}/${BRANCH}"
+                      
+                      echo "S3 Destination: ${S3_PATH}"
+                      
+                      # Upload package with metadata
+                      aws s3 cp ${PACKAGE_NAME} ${S3_PATH}/${PACKAGE_NAME} \
+                        --metadata "git-commit=<+codebase.commitSha>,build-number=<+pipeline.sequenceId>,branch=<+codebase.branch>"
+                      
+                      # Upload metadata file
+                      aws s3 cp metadata.json ${S3_PATH}/${PACKAGE_NAME}.metadata.json
+                      
+                      # Update latest symlink for the branch
+                      if [ "${BRANCH}" = "main" ] || [ "${BRANCH}" = "master" ]; then
+                        echo "Updating latest package link..."
+                        aws s3 cp ${PACKAGE_NAME} ${S3_PATH}/latest.tar.gz
+                        aws s3 cp metadata.json ${S3_PATH}/latest.metadata.json
+                      fi
+                      
+                      # Generate S3 URL
+                      S3_URL="${S3_PATH}/${PACKAGE_NAME}"
+                      echo "Upload completed successfully!"
+                      echo "S3 URL: ${S3_URL}"
+                      
+                      # Export for pipeline output
+                      echo "S3_URL=${S3_URL}" >> $HARNESS_ENV
+                      
+              - step:
+                  type: Run
+                  name: Verify Upload
+                  identifier: verify_upload
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: amazon/aws-cli:latest
+                    shell: Sh
+                    envVariables:
+                      AWS_ACCESS_KEY_ID: <+secrets.getValue("aws_access_key_id")>
+                      AWS_SECRET_ACCESS_KEY: <+secrets.getValue("aws_secret_access_key")>
+                      AWS_DEFAULT_REGION: <+pipeline.variables.aws_region>
+                      S3_BUCKET: <+pipeline.variables.s3_bucket>
+                      S3_PREFIX: <+pipeline.variables.s3_prefix>
+                      ENVIRONMENT: <+pipeline.variables.environment>
+                    command: |-
+                      echo "=== Verifying Upload ==="
+                      
+                      BRANCH="<+codebase.branch>"
+                      S3_PATH="s3://${S3_BUCKET}/${S3_PREFIX}/${ENVIRONMENT}/${BRANCH}"
+                      
+                      # Check if file exists
+                      if aws s3 ls ${S3_PATH}/${PACKAGE_NAME}; then
+                        echo "✓ Package verified in S3"
+                        
+                        # Get file size
+                        aws s3 ls ${S3_PATH}/${PACKAGE_NAME} --human-readable
+                      else
+                        echo "✗ Package not found in S3"
+                        exit 1
+                      fi
+                    
+              - step:
+                  type: Run
+                  name: Cleanup
+                  identifier: cleanup
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: alpine:latest
+                    shell: Sh
+                    command: |-
+                      echo "=== Cleanup ==="
+                      rm -f *.tar.gz metadata.json
+                      echo "Cleanup completed"
+                    when:
+                      stageStatus: All
+                    optional: true
+                    
+          sharedPaths:
+            - /harness
+            
+  variables:
+    - name: app_name
+      type: String
+      description: Application name
+      required: true
+      value: <+input>
+      
+    - name: s3_bucket
+      type: String
+      description: S3 bucket name
+      required: true
+      value: <+input>
+      
+    - name: s3_prefix
+      type: String
+      description: S3 prefix/folder path
+      required: false
+      value: builds
+      
+    - name: aws_region
+      type: String
+      description: AWS region
+      required: false
+      value: us-east-1
+      
+    - name: environment
+      type: String
+      description: Environment (dev/staging/prod)
+      required: true
+      value: <+input>.allowedValues(dev,staging,prod)
