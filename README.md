@@ -1,501 +1,227 @@
-# Harness Module Registry Pipeline with Automated Testing and Rollback
+# IAM Role Integration Testing
 
-This repository contains two comprehensive Harness pipeline implementations for creating modules in the Harness Module Registry, running validation tests, and automatically rolling back registry changes if tests fail.
+This directory contains Terraform test files for IAM role integration testing using the native Terraform testing framework.
 
-## 📋 Overview
+## Files
 
-Both pipelines implement a robust workflow:
-1. **Create/Prepare Module** - Package and validate the module
-2. **Register Module** - Create entry in Harness Module Registry
-3. **Run Tests** - Execute comprehensive testing pipelines
-4. **Rollback on Failure** - Automatically remove module from registry if tests fail
+- `iam_role_test.tftest.hcl` - Integration test file with comprehensive test cases
+- `iam_role_example.tf` - Example IAM role configuration to test against
+- `README.md` - This file
 
-## 🏗️ Pipeline Options
+## Prerequisites
 
-### Option 1: Basic Module Registry Pipeline
-**File:** `harness-module-registry-pipeline.yaml`
+- Terraform v1.6.0 or later (native test command support)
+- AWS credentials configured
+- Appropriate IAM permissions to create/delete IAM roles and policies
 
-A straightforward implementation suitable for:
-- Quick module registration
-- Integration with existing test pipelines
-- Generic module types (Terraform, Helm, scripts, etc.)
+## Test Coverage
 
-**Key Features:**
-- Shell-script based module creation
-- External testing pipeline integration
-- HTTP API-based rollback
-- Notification system integration
+The test file includes 15 comprehensive test scenarios:
 
-### Option 2: IACM Advanced Pipeline
-**File:** `harness-iacm-module-registry-advanced.yaml`
+1. **create_iam_role** - Verifies basic IAM role creation
+2. **verify_assume_role_policy** - Validates assume role policy JSON structure
+3. **verify_policy_attachment** - Checks managed policy attachment
+4. **verify_inline_policy** - Validates inline policy configuration
+5. **verify_role_tags** - Ensures proper tagging
+6. **verify_role_description** - Checks role description exists
+7. **verify_max_session_duration** - Validates session duration limits
+8. **verify_idempotency** - Ensures no changes on second apply
+9. **verify_trusted_entities** - Confirms trusted service principals
+10. **verify_role_path** - Validates IAM path format
+11. **destroy_resources** - Tests clean resource teardown
+12. **verify_permissions_boundary** - Checks permissions boundary if set
+13. **verify_force_detach_policies** - Validates force detach setting
+14. **verify_policy_permissions** - Tests policy action configuration
+15. **verify_unique_id** - Confirms AWS unique ID generation
 
-A comprehensive IACM-focused implementation with:
-- Full CI/CD integration with codebase cloning
-- Built-in Terraform validation and security scanning
-- IACM workspace creation for testing
-- Advanced compatibility testing
-- Native Terraform plugin integration
+## Running the Tests
 
-## 🚀 Quick Start
-
-### Prerequisites
-
-1. **Harness Account Setup:**
-   - Organization and Project created
-   - API key with module registry permissions
-   - CI/CD infrastructure configured
-
-2. **Required Secrets:**
-   ```yaml
-   harness_api_key: Your Harness API key with module registry access
-   ```
-
-3. **Connector Requirements:**
-   - Git connector for source code (IACM pipeline)
-   - Docker connector for container execution
-   - Cloud provider connector for IACM workspace
-
-### Basic Pipeline Setup
-
-1. **Import the pipeline:**
-   ```bash
-   # Option 1: Via Harness UI
-   # Navigate to Pipelines > Create Pipeline > Import from YAML
-   # Upload: harness-module-registry-pipeline.yaml
-   
-   # Option 2: Via API
-   curl -X POST \
-     'https://app.harness.io/gateway/pipeline/api/pipelines/v2?accountIdentifier=<account>&orgIdentifier=<org>&projectIdentifier=<project>' \
-     -H 'x-api-key: <your-api-key>' \
-     -H 'Content-Type: application/yaml' \
-     --data-binary @harness-module-registry-pipeline.yaml
-   ```
-
-2. **Configure required variables:**
-   - `moduleName`: Name of your module
-   - `moduleVersion`: Semantic version (e.g., 1.0.0)
-   - `moduleSource`: Git repository URL
-   - `testingPipelineId`: ID of your testing pipeline
-   - `registryUrl`: Harness IACM API endpoint
-
-3. **Run the pipeline:**
-   ```bash
-   # Trigger via UI or API
-   curl -X POST \
-     'https://app.harness.io/gateway/pipeline/api/pipeline/execute/<pipeline-id>?accountIdentifier=<account>' \
-     -H 'x-api-key: <your-api-key>' \
-     -H 'Content-Type: application/json' \
-     -d '{
-       "runtimeInputYaml": "variables:\n  moduleName: my-terraform-module\n  moduleVersion: 1.0.0"
-     }'
-   ```
-
-### IACM Pipeline Setup
-
-1. **Configure codebase:**
-   ```yaml
-   properties:
-     ci:
-       codebase:
-         connectorRef: <your-git-connector>
-         repoName: <your-repo-name>
-         build:
-           type: branch
-           spec:
-             branch: main
-   ```
-
-2. **Customize test inputs:**
-   ```yaml
-   testModuleInputs: |
-     region = "us-east-1"
-     environment = "test"
-     instance_type = "t3.micro"
-   ```
-
-3. **Run the pipeline** with the configured parameters
-
-## 📊 Pipeline Stages Breakdown
-
-### Stage 1: Module Preparation/Creation
-
-**Basic Pipeline:**
-```yaml
-- Validates module metadata
-- Creates registry entry via API
-- Publishes artifacts
-- Stores context for rollback
+### Run all tests
+```bash
+terraform test
 ```
 
-**IACM Pipeline:**
-```yaml
-- Clones codebase
-- Validates Terraform structure
-- Runs security scan (Checkov)
-- Packages module with versioning
+### Run specific test file
+```bash
+terraform test -filter=iam_role_test.tftest.hcl
 ```
 
-### Stage 2: Module Registration
-
-**Basic Pipeline:**
-```yaml
-- HTTP POST to create module
-- Artifact upload
-- Module publishing
+### Run tests with verbose output
+```bash
+terraform test -verbose
 ```
 
-**IACM Pipeline:**
-```yaml
-- HTTP API registration
-- Artifact upload via curl
-- Module status change to "published"
-- Metadata tracking
+### Run tests without cleanup (for debugging)
+```bash
+terraform test -no-cleanup
 ```
 
-### Stage 3: Testing
-
-**Basic Pipeline:**
-- Executes external testing pipeline
-- Passes module ID and version
-- Waits for completion
-
-**IACM Pipeline:**
-```yaml
-- Creates ephemeral IACM workspace
-- Initializes Terraform with new module
-- Runs plan/apply/destroy cycle
-- Executes integration tests
-- Validates outputs
+### Run specific test case
+```bash
+terraform test -filter=tests/iam_role_test.tftest.hcl -verbose -filter-run=create_iam_role
 ```
 
-### Stage 4: Validation Tests (IACM Only)
+## Test Variables
 
-```yaml
-- Validates registry entry status
-- Tests Terraform version compatibility
-- Verifies module accessibility
+You can override test variables by creating a `terraform.tfvars` file:
+
+```hcl
+role_name = "my-custom-role"
+environment = "staging"
+assume_role_services = ["ec2.amazonaws.com", "lambda.amazonaws.com"]
 ```
 
-### Stage 5: Rollback (On Failure)
+## Expected Test Output
 
-**Triggers when:**
-- Testing stage fails
-- Validation tests fail
-- Any critical error occurs
+```
+iam_role_test.tftest.hcl... in progress
+  run "create_iam_role"... pass
+  run "verify_assume_role_policy"... pass
+  run "verify_policy_attachment"... pass
+  run "verify_inline_policy"... pass
+  run "verify_role_tags"... pass
+  run "verify_role_description"... pass
+  run "verify_max_session_duration"... pass
+  run "verify_idempotency"... pass
+  run "verify_trusted_entities"... pass
+  run "verify_role_path"... pass
+  run "destroy_resources"... pass
+  run "verify_permissions_boundary"... pass
+  run "verify_force_detach_policies"... pass
+  run "verify_policy_permissions"... pass
+  run "verify_unique_id"... pass
+iam_role_test.tftest.hcl... tearing down
+iam_role_test.tftest.hcl... pass
 
-**Actions:**
-```yaml
-1. Load module context
-2. Unpublish module (change status)
-3. Delete module version from registry
-4. Clean up artifacts
-5. Send notifications
+Success! 15 passed, 0 failed.
 ```
 
-## 🔧 Configuration Options
+## Customizing Tests
 
-### Required Variables
+### Add Custom Assertions
 
-| Variable | Description | Example | Required |
-|----------|-------------|---------|----------|
-| `moduleName` | Module identifier | `aws-vpc-module` | Yes |
-| `moduleVersion` | Semantic version | `1.0.0` | Yes |
-| `moduleDescription` | Module description | `VPC module for AWS` | Yes |
-| `moduleProvider` | Cloud provider | `aws` | IACM only |
-| `registryUrl` | Registry API URL | `https://app.harness.io/gateway/iacm` | Yes |
+Add new `assert` blocks within existing `run` blocks:
 
-### Optional Variables
+```hcl
+run "create_iam_role" {
+  command = apply
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `moduleVisibility` | Access control | `private` |
-| `modulePath` | Path in repo | `.` |
-| `testModuleInputs` | Test variables | `""` |
-| `customTestScript` | Custom tests | `echo 'No tests'` |
-| `notificationWebhook` | Slack webhook | `""` |
+  assert {
+    condition     = aws_iam_role.this.name == var.role_name
+    error_message = "IAM role name does not match expected value"
+  }
+  
+  # Add your custom assertion
+  assert {
+    condition     = length(aws_iam_role.this.name) <= 64
+    error_message = "IAM role name must be 64 characters or less"
+  }
+}
+```
 
-## 🧪 Testing Strategy
+### Add New Test Cases
 
-### Built-in Tests (IACM Pipeline)
+Add new `run` blocks to test additional scenarios:
 
-1. **Structure Validation:**
-   - Terraform file presence check
-   - `terraform validate`
-   - Format checking
+```hcl
+run "verify_custom_behavior" {
+  command = apply
 
-2. **Security Scanning:**
-   - Checkov policy checks
-   - JUnit XML output
-   - Fail on critical issues
+  variables {
+    custom_var = "custom_value"
+  }
 
-3. **Integration Testing:**
-   - Real deployment to test workspace
-   - Output validation
-   - Custom test execution
-   - Resource cleanup
+  assert {
+    condition     = # your condition
+    error_message = "Your error message"
+  }
+}
+```
 
-4. **Compatibility Testing:**
-   - Multiple Terraform versions
-   - Provider compatibility
-   - Module dependency checks
+## Integration with CI/CD
 
-### External Testing (Basic Pipeline)
+### GitHub Actions Example
 
-Create a separate testing pipeline that:
+```yaml
+name: Terraform Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.6.0
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      
+      - name: Terraform Init
+        run: terraform init
+      
+      - name: Terraform Test
+        run: terraform test -verbose
+```
+
+### Harness CI Example
+
 ```yaml
 pipeline:
+  name: IAM Role Terraform Tests
+  identifier: iam_role_terraform_tests
   stages:
     - stage:
-        name: Test Module
-        variables:
-          - name: module_name
-            type: String
-          - name: module_version
-            type: String
-        steps:
-          - step:
-              name: Run Tests
-              # Your test logic here
+        name: Test
+        identifier: test
+        type: CI
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: Terraform Test
+                  identifier: terraform_test
+                  spec:
+                    shell: Bash
+                    command: |
+                      terraform init
+                      terraform test -verbose
 ```
 
-## 🔄 Rollback Mechanism
-
-### Automatic Rollback Triggers
-
-The rollback stage executes when:
-```yaml
-when:
-  pipelineStatus: Failure
-  condition: |
-    <+pipeline.stages.run_testing_pipeline.status> == "Failed" ||
-    <+pipeline.stages.create_test_workspace.status> == "Failed" ||
-    <+pipeline.stages.validation_tests.status> == "Failed"
-```
-
-### Rollback Process
-
-```mermaid
-graph TD
-    A[Test Failure Detected] --> B[Load Module Context]
-    B --> C[Unpublish Module]
-    C --> D[Delete Module Version]
-    D --> E[Clean Up Artifacts]
-    E --> F[Send Notifications]
-    F --> G[Rollback Complete]
-```
-
-### Manual Rollback
-
-If automatic rollback fails:
-
-```bash
-# Using Harness API
-MODULE_ID="<module-id>"
-ACCOUNT_ID="<account-id>"
-ORG_ID="<org-id>"
-PROJECT_ID="<project-id>"
-API_KEY="<your-api-key>"
-
-# Unpublish
-curl -X POST \
-  "https://app.harness.io/gateway/iacm/v1/orgs/${ORG_ID}/projects/${PROJECT_ID}/modules/${MODULE_ID}/unpublish" \
-  -H "x-api-key: ${API_KEY}"
-
-# Delete
-curl -X DELETE \
-  "https://app.harness.io/gateway/iacm/v1/orgs/${ORG_ID}/projects/${PROJECT_ID}/modules/${MODULE_ID}" \
-  -H "x-api-key: ${API_KEY}"
-```
-
-## 📧 Notifications
-
-### Slack Integration
-
-Configure webhook URL:
-```yaml
-variables:
-  - name: slackWebhook
-    value: https://hooks.slack.com/services/YOUR/WEBHOOK/URL
-```
-
-Notification includes:
-- Module name and version
-- Pipeline execution URL
-- Rollback status
-- Failure reason
-
-### Email Notifications
-
-Built-in email notifications:
-```yaml
-notificationRules:
-  - name: Pipeline Failure Notification
-    pipelineEvents:
-      - type: PipelineFailed
-    notificationMethod:
-      type: Email
-      spec:
-        recipients:
-          - <+pipeline.triggeredBy.email>
-```
-
-## 🛡️ Security Best Practices
-
-1. **API Key Management:**
-   ```yaml
-   # Store in Harness secrets
-   secrets.getValue('harness_api_key')
-   ```
-
-2. **Module Visibility:**
-   - Use `private` for internal modules
-   - Use `organization` for shared modules
-   - Avoid `public` unless necessary
-
-3. **Security Scanning:**
-   - Enable Checkov in CI stage
-   - Fail on critical/high severity issues
-   - Review scan results regularly
-
-4. **Access Control:**
-   - Limit API key permissions
-   - Use RBAC for pipeline execution
-   - Audit module registry access
-
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
-**Issue: Module creation fails**
-```bash
-# Check API response
-curl -X GET \
-  "https://app.harness.io/gateway/iacm/v1/orgs/${ORG_ID}/projects/${PROJECT_ID}/modules" \
-  -H "x-api-key: ${API_KEY}"
-```
+**Issue**: Tests fail with "resource not found"
+- **Solution**: Ensure you have proper AWS credentials configured
 
-**Issue: Rollback doesn't execute**
-- Verify `when` condition in rollback stage
-- Check stage status expressions
-- Review pipeline execution logs
+**Issue**: Tests timeout
+- **Solution**: Increase AWS API rate limits or add retry logic
 
-**Issue: Tests timeout**
-```yaml
-# Increase timeout in test steps
-timeout: 30m  # Adjust as needed
-```
+**Issue**: Idempotency test fails
+- **Solution**: Check for computed values that change between applies
 
-**Issue: Module context not found during rollback**
-```bash
-# Context file location
-/tmp/module_registry_context.json
+## Best Practices
 
-# Verify file creation in upload step
-cat /tmp/module_registry_context.json
-```
+1. Always test both `apply` and `plan` commands
+2. Include a destroy test to ensure clean teardown
+3. Test edge cases and failure scenarios
+4. Use variables to make tests reusable
+5. Add descriptive error messages to all assertions
+6. Group related assertions in the same `run` block
+7. Test idempotency to ensure stability
 
-## 📚 Advanced Usage
+## Additional Resources
 
-### Multi-Environment Deployment
-
-```yaml
-# Create separate pipelines for each environment
-- dev-module-registry
-- staging-module-registry  
-- prod-module-registry
-
-# Use different registry visibility
-dev: private
-staging: organization
-prod: organization
-```
-
-### Version Promotion
-
-```yaml
-# Promote successful modules
-pipeline:
-  stages:
-    - stage:
-        name: Promote to Production
-        when:
-          condition: <+pipeline.stages.validation_tests.status> == "Success"
-        steps:
-          - step:
-              name: Copy to Prod Registry
-              # Copy module to production registry
-```
-
-### Integration with GitOps
-
-```yaml
-# Trigger on Git events
-trigger:
-  name: Module Update Trigger
-  identifier: module_update
-  source:
-    type: Webhook
-    spec:
-      type: Github
-      spec:
-        type: PullRequest
-        spec:
-          events:
-            - Closed
-          pathFilters:
-            - modules/**/*.tf
-```
-
-## 📈 Monitoring and Metrics
-
-### Key Metrics to Track
-
-1. **Module Creation Success Rate**
-2. **Test Pass/Fail Rate**
-3. **Rollback Frequency**
-4. **Average Pipeline Duration**
-5. **Security Scan Results**
-
-### Dashboard Queries
-
-```sql
--- Module creation success rate (Harness Dashboard)
-SELECT 
-  COUNT(CASE WHEN status = 'SUCCESS' THEN 1 END) * 100.0 / COUNT(*) as success_rate
-FROM pipeline_executions
-WHERE pipeline_identifier = 'iacm_module_registry_advanced'
-  AND created_at > NOW() - INTERVAL '30 days'
-```
-
-## 🤝 Contributing
-
-To improve these pipelines:
-
-1. Test changes in development environment
-2. Update documentation
-3. Add relevant examples
-4. Submit changes for review
-
-## 📄 License
-
-These pipeline templates are provided as-is for use with Harness platform.
-
-## 🔗 Resources
-
-- [Harness Documentation](https://docs.harness.io)
-- [Harness IACM Guide](https://docs.harness.io/docs/infrastructure-as-code-management)
-- [Terraform Registry Docs](https://developer.hashicorp.com/terraform/registry)
-- [Harness API Reference](https://apidocs.harness.io)
-
-## 📞 Support
-
-For issues or questions:
-- Harness Support: support.harness.io
-- Harness Community: community.harness.io
-- Documentation: docs.harness.io
-
----
-
-**Version:** 1.0.0  
-**Last Updated:** 2025-11-17  
-**Compatibility:** Harness SaaS, Harness Self-Managed Enterprise Edition
+- [Terraform Testing Documentation](https://developer.hashicorp.com/terraform/language/tests)
+- [AWS IAM Best Practices](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html)
+- [Terraform AWS Provider](https://registry.terraform.io/providers/hashicorp/aws/latest/docs)
