@@ -69,6 +69,26 @@ has_integration_test() {
     return 1
 }
 
+# Get the path to integrationtest.tftest.hcl file
+get_integration_test_path() {
+    local test_dir=$1
+    
+    # Check for integrationtest.tftest.hcl file directly in test directory
+    if [[ -f "$test_dir/integrationtest.tftest.hcl" ]]; then
+        echo "$test_dir/integrationtest.tftest.hcl"
+        return 0
+    fi
+    
+    # Check subdirectories for the file
+    local found=$(find "$test_dir" -name "integrationtest.tftest.hcl" -type f 2>/dev/null | head -1)
+    if [[ -n "$found" ]]; then
+        echo "$found"
+        return 0
+    fi
+    
+    return 1
+}
+
 run_tofu_test() {
     local module_dir=$1
     local module_name=$(basename "$module_dir")
@@ -86,19 +106,16 @@ run_tofu_test() {
     echo "Path: $module_dir"
     echo "Test directory: $test_dir"
     
-    # List integrationtest.tftest.hcl files found
+    # Get the integration test file path
+    local integration_test_file=""
     if [[ -n "$test_dir" ]]; then
-        local integration_test_files=$(find "$test_dir" -name "integrationtest.tftest.hcl" -type f 2>/dev/null)
+        integration_test_file=$(get_integration_test_path "$test_dir")
         
-        if [[ -n "$integration_test_files" ]]; then
+        if [[ -n "$integration_test_file" ]]; then
             echo "Integration test file found:"
-            echo "$integration_test_files" | while read -r file; do
-                if [[ -n "$file" ]]; then
-                    # Show relative path from module directory
-                    local rel_path=${file#$module_dir/}
-                    echo "  - $rel_path"
-                fi
-            done
+            # Show relative path from module directory
+            local rel_path=${integration_test_file#$module_dir/}
+            echo "  - $rel_path"
         else
             echo "Warning: No integrationtest.tftest.hcl file found"
             echo "Directory contents:"
@@ -120,17 +137,27 @@ run_tofu_test() {
         echo "Module initialization had warnings or was skipped"
     fi
     
-    # Run tofu test
-    echo "Running tests..."
-    if $TOFU_CMD test; then
-        echo "Tests passed for module: $module_name"
-        TEST_RESULTS+=("$module_name: PASSED")
-        ((TESTED_MODULES++))
-        return 0
+    # Run tofu test with filter for integrationtest.tftest.hcl
+    if [[ -n "$integration_test_file" ]]; then
+        # Get the relative path of the test file from module directory
+        local test_file_rel_path=${integration_test_file#$module_dir/}
+        
+        echo "Running tests with filter..."
+        echo "Command: tofu test -filter=\"$test_file_rel_path\""
+        
+        if $TOFU_CMD test -filter="$test_file_rel_path"; then
+            echo "Tests passed for module: $module_name"
+            TEST_RESULTS+=("$module_name: PASSED")
+            ((TESTED_MODULES++))
+            return 0
+        else
+            echo "Tests failed for module: $module_name"
+            TEST_RESULTS+=("$module_name: FAILED")
+            ((FAILED_MODULES++))
+            return 1
+        fi
     else
-        echo "Tests failed for module: $module_name"
-        TEST_RESULTS+=("$module_name: FAILED")
-        ((FAILED_MODULES++))
+        echo "Error: No integration test file to run"
         return 1
     fi
 }
@@ -179,7 +206,7 @@ find_and_test_modules() {
         # Check if the test directory has integrationtest.tftest.hcl file
         if has_integration_test "$test_parent_dir"; then
             echo "  Integration test: Yes"
-            echo "  ACTION: Will run tests"
+            echo "  ACTION: Will run tests with filter"
             
             local current_dir=$(pwd)
             run_tofu_test "$module_dir"
@@ -249,6 +276,7 @@ main() {
     
     echo "Starting scan from: $ROOT_DIR"
     echo "Looking specifically for: integrationtest.tftest.hcl files"
+    echo "Will use: tofu test -filter=\"path/to/integrationtest.tftest.hcl\""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
     # Use the recursive search
