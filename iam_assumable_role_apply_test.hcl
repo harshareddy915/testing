@@ -1,421 +1,260 @@
+# Integration tests for iam-assumable-role module with custom trust policy conditions
+
 variables {
-  aws_region  = "us-east-1"
-  test_prefix = "test-iam-role"
-  timestamp   = formatdate("YYYYMMDDhhmmss", timestamp())
+  aws_caller_identity = "current"
+  aws_partition       = "current"
 }
 
-run "create_role_with_account_trust" {
+# Test 1: Basic assume role with simple trust policy
+run "test_basic_assume_role_creation" {
   command = apply
 
   variables {
-    role_name        = "${var.test_prefix}-account-${var.timestamp}"
-    role_description = "Test IAM role with account trust"
-    
-    # Trust policy configuration
-    trusted_principal_type = "AWS"
-    trusted_principals = [
-      "arn:aws:iam::123456789012:root"
-    ]
-    
-    require_mfa          = true
-    max_session_duration = 3600
-    
-    tags = {
-      Environment = "test"
-      ManagedBy   = "Terraform"
-      TestType    = "Integration"
-    }
+    role_name                          = "test-assume-role-basic"
+    role_sts_externalid               = ["ExternalId123"]
+    trusted_role_actions              = ["sts:AssumeRole"]
+    custom_role_trust_policy_condition = ""
+    custom_role_trust_policy           = ""
   }
 
   assert {
-    condition     = output.role_arn != ""
-    error_message = "Role ARN must not be empty"
+    condition     = aws_iam_role.this[0].name == "test-assume-role-basic"
+    error_message = "IAM role name does not match expected value"
   }
 
   assert {
-    condition     = output.role_name == "${var.test_prefix}-account-${var.timestamp}"
-    error_message = "Role name does not match expected value"
+    condition     = length(aws_iam_role.this[0].assume_role_policy) > 0
+    error_message = "Assume role policy should not be empty"
   }
 
   assert {
-    condition     = output.assume_role_policy != ""
-    error_message = "Assume role policy must not be empty"
-  }
-}
-
-run "create_role_with_iam_role_trust" {
-  command = apply
-
-  variables {
-    role_name        = "${var.test_prefix}-role-${var.timestamp}"
-    role_description = "Test IAM role with IAM role trust"
-    
-    # Trust policy configuration
-    trusted_principal_type = "AWS"
-    trusted_principals = [
-      "arn:aws:iam::123456789012:role/AdminRole",
-      "arn:aws:iam::123456789012:role/DevOpsRole"
-    ]
-    
-    require_mfa          = true
-    max_session_duration = 7200
-    
-    tags = {
-      Environment = "test"
-      ManagedBy   = "Terraform"
-    }
-  }
-
-  assert {
-    condition     = output.role_arn != ""
-    error_message = "Role with IAM role trust must be created"
-  }
-
-  assert {
-    condition     = can(jsondecode(output.assume_role_policy))
+    condition     = can(jsondecode(aws_iam_role.this[0].assume_role_policy))
     error_message = "Assume role policy must be valid JSON"
   }
 }
 
-run "create_role_without_mfa" {
+# Test 2: Assume role with custom trust policy conditions
+run "test_assume_role_with_custom_conditions" {
   command = apply
 
   variables {
-    role_name        = "${var.test_prefix}-nomfa-${var.timestamp}"
-    role_description = "Test IAM role without MFA requirement"
+    role_name                = "test-assume-role-conditions"
+    role_sts_externalid     = ["ExternalId456"]
+    trusted_role_actions    = ["sts:AssumeRole"]
+    custom_role_trust_policy_condition = var.create_custom_role_trust_policy && var.role_requires_mfa ? 1 : 0
     
-    # Trust policy configuration
-    trusted_principal_type = "AWS"
-    trusted_principals = [
-      "arn:aws:iam::123456789012:role/TrustedRole"
-    ]
-    
-    require_mfa          = false
-    max_session_duration = 3600
-    
-    tags = {
-      Environment = "test"
-      ManagedBy   = "Terraform"
-    }
+    role_requires_session_name = true
+    role_session_name          = "testSessionName"
   }
 
   assert {
-    condition     = output.role_arn != ""
-    error_message = "Role without MFA must be created"
+    condition     = aws_iam_role.this[0].name == "test-assume-role-conditions"
+    error_message = "IAM role name does not match expected value"
   }
 
   assert {
-    condition     = output.role_id != ""
-    error_message = "Role ID must not be empty"
+    condition     = contains(jsondecode(aws_iam_role.this[0].assume_role_policy).Statement[*].Effect, "Allow")
+    error_message = "Policy should contain Allow effect"
   }
 }
 
-run "create_role_with_external_id" {
+# Test 3: Assume role with AWS service principals
+run "test_assume_role_with_aws_services" {
   command = apply
 
   variables {
-    role_name        = "${var.test_prefix}-extid-${var.timestamp}"
-    role_description = "Test IAM role with external ID"
-    
-    # Trust policy configuration
-    trusted_principal_type = "AWS"
-    trusted_principals = [
-      "arn:aws:iam::123456789012:root"
-    ]
-    
-    require_mfa  = true
-    external_id  = "unique-external-id-12345"
-    
-    max_session_duration = 3600
-    
-    tags = {
-      Environment = "test"
-      ManagedBy   = "Terraform"
-    }
-  }
-
-  assert {
-    condition     = output.role_arn != ""
-    error_message = "Role with external ID must be created"
-  }
-}
-
-run "create_role_with_service_trust" {
-  command = apply
-
-  variables {
-    role_name        = "${var.test_prefix}-service-${var.timestamp}"
-    role_description = "Test IAM role with service trust"
-    role_path        = "/service-roles/"
-    
-    # Trust policy configuration for AWS service
-    trusted_principal_type = "Service"
-    trusted_principals = [
+    role_name            = "test-assume-role-services"
+    trusted_role_services = [
+      "ec2.amazonaws.com",
       "lambda.amazonaws.com",
       "ecs-tasks.amazonaws.com"
     ]
-    
-    require_mfa          = false
-    max_session_duration = 3600
-    
-    tags = {
-      Environment = "test"
-      ManagedBy   = "Terraform"
-      RoleType    = "Service"
-    }
   }
 
   assert {
-    condition     = output.role_arn != ""
-    error_message = "Service role must be created"
+    condition     = aws_iam_role.this[0].name == "test-assume-role-services"
+    error_message = "IAM role name does not match expected value"
   }
 
   assert {
-    condition     = output.role_path == "/service-roles/"
-    error_message = "Role path should be /service-roles/"
+    condition     = can(regex("ec2.amazonaws.com", aws_iam_role.this[0].assume_role_policy))
+    error_message = "EC2 service principal should be in assume role policy"
+  }
+
+  assert {
+    condition     = can(regex("lambda.amazonaws.com", aws_iam_role.this[0].assume_role_policy))
+    error_message = "Lambda service principal should be in assume role policy"
   }
 }
 
-run "create_role_with_federated_trust" {
+# Test 4: Assume role with ARN-based trust
+run "test_assume_role_with_trusted_arns" {
   command = apply
 
   variables {
-    role_name        = "${var.test_prefix}-federated-${var.timestamp}"
-    role_description = "Test IAM role with federated trust"
-    
-    # Trust policy configuration for federated access
-    trusted_principal_type = "Federated"
-    trusted_principals = [
-      "arn:aws:iam::123456789012:saml-provider/CompanySAML"
+    role_name              = "test-assume-role-arns"
+    trusted_role_arns      = [
+      "arn:aws:iam::123456789012:role/trusted-role-1",
+      "arn:aws:iam::123456789012:role/trusted-role-2"
     ]
-    
-    federated_conditions = [
-      {
-        test     = "StringEquals"
-        variable = "SAML:aud"
-        values   = ["https://signin.aws.amazon.com/saml"]
-      }
-    ]
-    
-    require_mfa          = false
-    max_session_duration = 3600
-    
-    tags = {
-      Environment = "test"
-      ManagedBy   = "Terraform"
-    }
+    role_requires_mfa      = true
+    custom_role_trust_policy_condition = var.role_requires_mfa ? 1 : 0
   }
 
   assert {
-    condition     = output.role_arn != ""
-    error_message = "Federated role must be created"
+    condition     = aws_iam_role.this[0].name == "test-assume-role-arns"
+    error_message = "IAM role name does not match expected value"
+  }
+
+  assert {
+    condition     = can(regex("123456789012", aws_iam_role.this[0].assume_role_policy))
+    error_message = "Trusted account ID should be in assume role policy"
+  }
+
+  assert {
+    condition     = can(regex("aws:MultiFactorAuthPresent", aws_iam_role.this[0].assume_role_policy)) || !var.role_requires_mfa
+    error_message = "MFA condition should be present when role_requires_mfa is true"
   }
 }
 
-run "create_role_with_multiple_conditions" {
-  command = apply
+# Test 5: Data source validation for assume role policy
+run "test_data_source_assume_role_policy" {
+  command = plan
 
   variables {
-    role_name        = "${var.test_prefix}-cond-${var.timestamp}"
-    role_description = "Test IAM role with multiple conditions"
-    
-    # Trust policy configuration
-    trusted_principal_type = "AWS"
-    trusted_principals = [
-      "arn:aws:iam::123456789012:role/TrustedRole"
-    ]
-    
-    require_mfa = true
-    external_id = "test-external-id"
-    
-    additional_conditions = [
-      {
-        test     = "IpAddress"
-        variable = "aws:SourceIp"
-        values   = ["203.0.113.0/24", "198.51.100.0/24"]
-      },
-      {
-        test     = "StringEquals"
-        variable = "aws:PrincipalOrgID"
-        values   = ["o-exampleorgid"]
-      }
-    ]
-    
-    max_session_duration = 3600
-    
-    tags = {
-      Environment = "test"
-      ManagedBy   = "Terraform"
-    }
+    role_name                          = "test-assume-role-datasource"
+    create_custom_role_trust_policy    = true
+    role_requires_mfa                  = false
+    role_sts_externalid               = ["ExternalId789"]
   }
 
   assert {
-    condition     = output.role_arn != ""
-    error_message = "Role with multiple conditions must be created"
+    condition     = data.aws_iam_policy_document.assume_role[0] != null
+    error_message = "Data source for assume role policy should exist"
   }
 }
 
-run "create_role_with_permissions_boundary" {
+# Test 6: Statement block with ExplicitSelfRoleAssumption
+run "test_explicit_self_role_assumption" {
   command = apply
 
   variables {
-    role_name        = "${var.test_prefix}-boundary-${var.timestamp}"
-    role_description = "Test IAM role with permissions boundary"
-    
-    # Trust policy configuration
-    trusted_principal_type = "AWS"
-    trusted_principals = [
-      "arn:aws:iam::123456789012:role/TrustedRole"
-    ]
-    
-    require_mfa                = true
-    permissions_boundary_arn   = "arn:aws:iam::123456789012:policy/PermissionsBoundary"
-    max_session_duration       = 3600
-    
-    tags = {
-      Environment = "test"
-      ManagedBy   = "Terraform"
-    }
+    role_name    = "test-self-assume-role"
+    role_sts_externalid = []
   }
 
   assert {
-    condition     = output.role_arn != ""
-    error_message = "Role with permissions boundary must be created"
+    condition     = aws_iam_role.this[0].name == "test-self-assume-role"
+    error_message = "IAM role name does not match expected value"
   }
 
   assert {
-    condition     = output.permissions_boundary_arn == "arn:aws:iam::123456789012:policy/PermissionsBoundary"
-    error_message = "Permissions boundary ARN must match"
+    condition     = can(regex("ExplicitSelfRoleAssumption", aws_iam_role.this[0].assume_role_policy))
+    error_message = "ExplicitSelfRoleAssumption statement should be in policy"
   }
 }
 
-run "create_role_with_custom_path" {
+# Test 7: Complex condition with multiple principals
+run "test_complex_trust_policy_conditions" {
   command = apply
 
   variables {
-    role_name        = "${var.test_prefix}-path-${var.timestamp}"
-    role_description = "Test IAM role with custom path"
-    role_path        = "/custom/path/"
-    
-    # Trust policy configuration
-    trusted_principal_type = "AWS"
-    trusted_principals = [
-      "arn:aws:iam::123456789012:root"
-    ]
-    
-    require_mfa          = true
-    max_session_duration = 3600
-    
-    tags = {
-      Environment = "test"
-      ManagedBy   = "Terraform"
-    }
+    role_name                = "test-complex-conditions"
+    trusted_role_arns        = ["arn:aws:iam::123456789012:role/app-role"]
+    role_requires_mfa        = true
+    role_requires_session_name = true
+    role_session_name          = "requiredSession"
+    custom_role_trust_policy_condition = 1
   }
 
   assert {
-    condition     = output.role_arn != ""
-    error_message = "Role with custom path must be created"
+    condition     = aws_iam_role.this[0].name == "test-complex-conditions"
+    error_message = "IAM role name does not match expected value"
   }
 
   assert {
-    condition     = contains(output.role_arn, "/custom/path/")
-    error_message = "Role ARN must contain custom path"
+    condition     = length(jsondecode(aws_iam_role.this[0].assume_role_policy).Statement) > 0
+    error_message = "Policy should have at least one statement"
   }
 }
 
-run "create_role_with_max_session_duration" {
+# Test 8: Policy validation with custom trust policy document
+run "test_custom_trust_policy_document" {
   command = apply
 
   variables {
-    role_name        = "${var.test_prefix}-maxsession-${var.timestamp}"
-    role_description = "Test IAM role with maximum session duration"
-    
-    # Trust policy configuration
-    trusted_principal_type = "AWS"
-    trusted_principals = [
-      "arn:aws:iam::123456789012:role/TrustedRole"
-    ]
-    
-    require_mfa          = true
-    max_session_duration = 43200  # 12 hours
-    
-    tags = {
-      Environment = "test"
-      ManagedBy   = "Terraform"
-    }
+    role_name                    = "test-custom-trust-doc"
+    create_custom_role_trust_policy = true
+    role_requires_mfa            = true
+    custom_role_trust_policy     = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Effect = "Allow"
+          Principal = {
+            AWS = "arn:aws:iam::123456789012:root"
+          }
+          Action = "sts:AssumeRole"
+          Condition = {
+            StringEquals = {
+              "sts:ExternalId" = "CustomExternalId"
+            }
+          }
+        }
+      ]
+    })
   }
 
   assert {
-    condition     = output.role_arn != ""
-    error_message = "Role with max session duration must be created"
+    condition     = aws_iam_role.this[0].name == "test-custom-trust-doc"
+    error_message = "IAM role name does not match expected value"
   }
 
   assert {
-    condition     = output.max_session_duration == 43200
-    error_message = "Max session duration should be 43200 seconds"
+    condition     = can(regex("CustomExternalId", aws_iam_role.this[0].assume_role_policy))
+    error_message = "Custom external ID should be in policy"
   }
 }
 
-run "create_role_cross_account_with_mfa" {
-  command = apply
+# Test 9: Integration with AWS partition and account data
+run "test_aws_partition_integration" {
+  command = plan
 
-  variables {
-    role_name        = "${var.test_prefix}-xacct-mfa-${var.timestamp}"
-    role_description = "Test cross-account IAM role with MFA"
-    
-    # Trust policy configuration for cross-account
-    trusted_principal_type = "AWS"
-    trusted_principals = [
-      "arn:aws:iam::123456789012:root",
-      "arn:aws:iam::210987654321:root"
-    ]
-    
-    require_mfa          = true
-    max_session_duration = 7200
-    
-    tags = {
-      Environment = "test"
-      ManagedBy   = "Terraform"
-      AccessType  = "CrossAccount"
-    }
+  assert {
+    condition     = data.aws_caller_identity.current != null
+    error_message = "AWS caller identity data source should be available"
   }
 
   assert {
-    condition     = output.role_arn != ""
-    error_message = "Cross-account role with MFA must be created"
+    condition     = data.aws_partition.current != null
+    error_message = "AWS partition data source should be available"
   }
 
   assert {
-    condition     = can(regex("Bool.*aws:MultiFactorAuthPresent", output.assume_role_policy))
-    error_message = "Assume role policy must contain MFA condition"
+    condition     = data.aws_caller_identity.current.account_id != ""
+    error_message = "Account ID should not be empty"
   }
 }
 
-run "create_role_with_force_detach_policies" {
+# Test 10: Role with trusted actions and compact statements
+run "test_trusted_actions_compact" {
   command = apply
 
   variables {
-    role_name        = "${var.test_prefix}-detach-${var.timestamp}"
-    role_description = "Test IAM role with force detach policies"
-    
-    # Trust policy configuration
-    trusted_principal_type = "AWS"
-    trusted_principals = [
-      "arn:aws:iam::123456789012:role/TrustedRole"
+    role_name            = "test-trusted-actions"
+    trusted_role_actions = ["sts:AssumeRole"]
+    trusted_role_arns    = [
+      "arn:aws:iam::123456789012:role/deploy-role"
     ]
-    
-    require_mfa            = true
-    force_detach_policies  = true
-    max_session_duration   = 3600
-    
-    tags = {
-      Environment = "test"
-      ManagedBy   = "Terraform"
-    }
   }
 
   assert {
-    condition     = output.role_arn != ""
-    error_message = "Role with force detach policies must be created"
+    condition     = aws_iam_role.this[0].name == "test-trusted-actions"
+    error_message = "IAM role name does not match expected value"
+  }
+
+  assert {
+    condition     = can(jsondecode(aws_iam_role.this[0].assume_role_policy).Statement)
+    error_message = "Policy should have valid Statement block"
   }
 }
