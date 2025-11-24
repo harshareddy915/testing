@@ -1,11 +1,8 @@
-# Integration tests for iam-assumable-role module with custom trust policy conditions
-
 variables {
   aws_caller_identity = "current"
   aws_partition       = "current"
 }
 
-# Test 1: Basic assume role with simple trust policy
 run "test_basic_assume_role_creation" {
   command = apply
 
@@ -33,7 +30,6 @@ run "test_basic_assume_role_creation" {
   }
 }
 
-# Test 2: Assume role with custom trust policy conditions
 run "test_assume_role_with_custom_conditions" {
   command = apply
 
@@ -58,7 +54,6 @@ run "test_assume_role_with_custom_conditions" {
   }
 }
 
-# Test 3: Assume role with AWS service principals
 run "test_assume_role_with_aws_services" {
   command = apply
 
@@ -87,7 +82,6 @@ run "test_assume_role_with_aws_services" {
   }
 }
 
-# Test 4: Assume role with ARN-based trust
 run "test_assume_role_with_trusted_arns" {
   command = apply
 
@@ -117,9 +111,8 @@ run "test_assume_role_with_trusted_arns" {
   }
 }
 
-# Test 5: Data source validation for assume role policy
 run "test_data_source_assume_role_policy" {
-  command = plan
+  command = apply
 
   variables {
     role_name                          = "test-assume-role-datasource"
@@ -134,7 +127,6 @@ run "test_data_source_assume_role_policy" {
   }
 }
 
-# Test 6: Statement block with ExplicitSelfRoleAssumption
 run "test_explicit_self_role_assumption" {
   command = apply
 
@@ -154,7 +146,6 @@ run "test_explicit_self_role_assumption" {
   }
 }
 
-# Test 7: Complex condition with multiple principals
 run "test_complex_trust_policy_conditions" {
   command = apply
 
@@ -178,7 +169,6 @@ run "test_complex_trust_policy_conditions" {
   }
 }
 
-# Test 8: Policy validation with custom trust policy document
 run "test_custom_trust_policy_document" {
   command = apply
 
@@ -216,9 +206,12 @@ run "test_custom_trust_policy_document" {
   }
 }
 
-# Test 9: Integration with AWS partition and account data
 run "test_aws_partition_integration" {
-  command = plan
+  command = apply
+
+  variables {
+    role_name = "test-partition-integration"
+  }
 
   assert {
     condition     = data.aws_caller_identity.current != null
@@ -236,25 +229,3 @@ run "test_aws_partition_integration" {
   }
 }
 
-# Test 10: Role with trusted actions and compact statements
-run "test_trusted_actions_compact" {
-  command = apply
-
-  variables {
-    role_name            = "test-trusted-actions"
-    trusted_role_actions = ["sts:AssumeRole"]
-    trusted_role_arns    = [
-      "arn:aws:iam::123456789012:role/deploy-role"
-    ]
-  }
-
-  assert {
-    condition     = aws_iam_role.this[0].name == "test-trusted-actions"
-    error_message = "IAM role name does not match expected value"
-  }
-
-  assert {
-    condition     = can(jsondecode(aws_iam_role.this[0].assume_role_policy).Statement)
-    error_message = "Policy should have valid Statement block"
-  }
-}
