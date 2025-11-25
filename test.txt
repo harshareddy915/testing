@@ -93,3 +93,404 @@
                       RELEASE_VERSION: <+pipeline.variables.RELEASE_VERSION>
                     outputVariables:
                       - name: CHANGELOG_VERSION
+
+
+==================================================================================================
+
+#!/bin/bash
+                      set -e
+                      
+                      echo "=========================================="
+                      echo "Version Detection from Git Releases"
+                      echo "=========================================="
+                      
+                      # Get the latest release tag
+                      LATEST_RELEASE=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+                      echo "Latest Release: $LATEST_RELEASE"
+                      
+                      # Parse semantic version
+                      VERSION_NUMBER=$(echo "$LATEST_RELEASE" | sed 's/^v//')
+                      MAJOR=$(echo "$VERSION_NUMBER" | cut -d. -f1)
+                      MINOR=$(echo "$VERSION_NUMBER" | cut -d. -f2)
+                      PATCH=$(echo "$VERSION_NUMBER" | cut -d. -f3)
+                      
+                      echo "Current Version Components:"
+                      echo "  Major: $MAJOR"
+                      echo "  Minor: $MINOR"
+                      echo "  Patch: $PATCH"
+                      
+                      # Get previous tag (one before latest)
+                      if [ "$LATEST_RELEASE" != "v0.0.0" ]; then
+                        PREVIOUS_TAG=$(git describe --tags --abbrev=0 ${LATEST_RELEASE}^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
+                      else
+                        PREVIOUS_TAG=$(git rev-list --max-parents=0 HEAD)
+                      fi
+                      
+                      echo "Previous Tag: $PREVIOUS_TAG"
+                      
+                      # Determine commit range for analysis
+                      if [ "$LATEST_RELEASE" != "v0.0.0" ]; then
+                        COMMIT_RANGE="${LATEST_RELEASE}..HEAD"
+                      else
+                        COMMIT_RANGE="HEAD"
+                      fi
+                      
+                      echo ""
+                      echo "Analyzing commit range: $COMMIT_RANGE"
+                      
+                      # Auto-detect version bump type based on conventional commits
+                      HAS_BREAKING=$(git log $COMMIT_RANGE --format="%s%n%b" | grep -c "BREAKING CHANGE" || echo "0")
+                      HAS_FEAT=$(git log $COMMIT_RANGE --grep="^feat" --oneline | wc -l || echo "0")
+                      HAS_FIX=$(git log $COMMIT_RANGE --grep="^fix" --oneline | wc -l || echo "0")
+                      
+                      echo ""
+                      echo "Commit Analysis:"
+                      echo "  Breaking Changes: $HAS_BREAKING"
+                      echo "  New Features: $HAS_FEAT"
+                      echo "  Bug Fixes: $HAS_FIX"
+                      
+                      # Determine version bump type
+                      if [ "$HAS_BREAKING" -gt 0 ]; then
+                        BUMP_TYPE="major"
+                        MAJOR=$((MAJOR + 1))
+                        MINOR=0
+                        PATCH=0
+                      elif [ "$HAS_FEAT" -gt 0 ]; then
+                        BUMP_TYPE="minor"
+                        MINOR=$((MINOR + 1))
+                        PATCH=0
+                      else
+                        BUMP_TYPE="patch"
+                        PATCH=$((PATCH + 1))
+                      fi
+                      
+                      # Allow manual override if RELEASE_VERSION is provided
+                      if [ -n "${RELEASE_VERSION}" ] && [ "${RELEASE_VERSION}" != "auto" ]; then
+                        CURRENT_VERSION="${RELEASE_VERSION}"
+                        echo ""
+                        echo "Using manual version override: $CURRENT_VERSION"
+                      else
+                        CURRENT_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+                        echo ""
+                        echo "Auto-detected version bump: $BUMP_TYPE"
+                        echo "New Version: $CURRENT_VERSION"
+                      fi
+                      
+                      # Ensure version starts with 'v'
+                      if [[ ! $CURRENT_VERSION == v* ]]; then
+                        CURRENT_VERSION="v${CURRENT_VERSION}"
+                      fi
+                      
+                      echo ""
+                      echo "=========================================="
+                      echo "Version Information:"
+                      echo "  Previous: $LATEST_RELEASE"
+                      echo "  Current: $CURRENT_VERSION"
+                      echo "  Bump Type: $BUMP_TYPE"
+                      echo "=========================================="
+                      
+                      # Export variables for next steps
+                      export CURRENT_VERSION
+                      export PREVIOUS_TAG
+                      export LATEST_RELEASE
+                      export BUMP_TYPE
+                    envVariables:
+                      RELEASE_VERSION: <+pipeline.variables.RELEASE_VERSION>
+                    outputVariables:
+                      - name: CURRENT_VERSION
+                      - name: PREVIOUS_TAG
+                      - name: LATEST_RELEASE
+                      - name: BUMP_TYPE
+
+
+___________________________________________________________________________________________________________________________________________________________
+
+
+#!/bin/bash
+                      set -e
+                      
+                      CURRENT_VERSION="<+execution.steps.auto_detect_version.output.outputVariables.CURRENT_VERSION>"
+                      PREVIOUS_TAG="<+execution.steps.auto_detect_version.output.outputVariables.PREVIOUS_TAG>"
+                      LATEST_RELEASE="<+execution.steps.auto_detect_version.output.outputVariables.LATEST_RELEASE>"
+                      
+                      echo "=========================================="
+                      echo "Generating Enhanced Changelog"
+                      echo "=========================================="
+                      echo "Version: $CURRENT_VERSION"
+                      echo "Previous: $PREVIOUS_TAG"
+                      echo "=========================================="
+                      
+                      # Determine commit range
+                      if [ "$LATEST_RELEASE" != "v0.0.0" ] && git rev-parse "$LATEST_RELEASE" >/dev/null 2>&1; then
+                        COMMIT_RANGE="${LATEST_RELEASE}..HEAD"
+                      else
+                        COMMIT_RANGE="HEAD"
+                      fi
+                      
+                      # Create changelog file
+                      CHANGELOG_FILE="CHANGELOG-${CURRENT_VERSION}.md"
+                      
+                      # Start building changelog with enhanced metadata
+                      cat > "$CHANGELOG_FILE" << EOF
+                      # 📋 Changelog - Version ${CURRENT_VERSION}
+                      
+                      **Release Date:** $(date +"%Y-%m-%d %H:%M:%S %Z")  
+                      **Previous Version:** ${LATEST_RELEASE}  
+                      **Repository:** <+codebase.repoUrl>  
+                      **Branch:** <+codebase.branch>  
+                      **Commit:** \`$(git rev-parse --short HEAD)\`  
+                      **Build Number:** #<+pipeline.sequenceId>  
+                      **Triggered By:** <+pipeline.triggeredBy.name>  
+                      **Pipeline:** <+pipeline.name>  
+                      
+                      ---
+                      
+                      EOF
+                      
+                      # Function to categorize commits with detailed information
+                      categorize_commits() {
+                        local commit_range="$1"
+                        
+                        # Features with detailed descriptions
+                        echo "## 🚀 Features" >> "$CHANGELOG_FILE"
+                        FEAT_COMMITS=$(git log "$commit_range" --pretty=format:"- **%s** (\`%h\`)%n  👤 %an | 📅 %ar%n" --grep="^feat" 2>/dev/null || echo "")
+                        if [ -n "$FEAT_COMMITS" ]; then
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "$FEAT_COMMITS" >> "$CHANGELOG_FILE"
+                        else
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "_No new features in this release_" >> "$CHANGELOG_FILE"
+                        fi
+                        echo "" >> "$CHANGELOG_FILE"
+                        
+                        # Breaking Changes (Critical section)
+                        BREAKING_CHANGES=$(git log "$commit_range" --format="%s%n%b" --grep="BREAKING CHANGE" 2>/dev/null || echo "")
+                        if [ -n "$BREAKING_CHANGES" ]; then
+                          echo "## ⚠️ BREAKING CHANGES" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "> **Warning:** This release contains breaking changes that may require code updates." >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "$BREAKING_CHANGES" | grep -A 3 "BREAKING CHANGE:" | sed 's/BREAKING CHANGE: /- 🚨 /' >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                        fi
+                        
+                        # Bug Fixes
+                        echo "## 🐛 Bug Fixes" >> "$CHANGELOG_FILE"
+                        FIX_COMMITS=$(git log "$commit_range" --pretty=format:"- **%s** (\`%h\`)%n  👤 %an | 📅 %ar%n" --grep="^fix" 2>/dev/null || echo "")
+                        if [ -n "$FIX_COMMITS" ]; then
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "$FIX_COMMITS" >> "$CHANGELOG_FILE"
+                        else
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "_No bug fixes in this release_" >> "$CHANGELOG_FILE"
+                        fi
+                        echo "" >> "$CHANGELOG_FILE"
+                        
+                        # Security Fixes (Important)
+                        SECURITY_COMMITS=$(git log "$commit_range" --pretty=format:"- **%s** (\`%h\`)%n  👤 %an | 📅 %ar" --grep="security\|vulnerability\|CVE" 2>/dev/null || echo "")
+                        if [ -n "$SECURITY_COMMITS" ]; then
+                          echo "## 🔒 Security Fixes" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "> **Important:** This release includes security updates." >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "$SECURITY_COMMITS" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                        fi
+                        
+                        # Performance Improvements
+                        PERF_COMMITS=$(git log "$commit_range" --pretty=format:"- **%s** (\`%h\`) - %an" --grep="^perf" 2>/dev/null || echo "")
+                        if [ -n "$PERF_COMMITS" ]; then
+                          echo "## ⚡ Performance Improvements" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "$PERF_COMMITS" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                        fi
+                        
+                        # Documentation
+                        DOCS_COMMITS=$(git log "$commit_range" --pretty=format:"- %s (\`%h\`)" --grep="^docs" 2>/dev/null || echo "")
+                        if [ -n "$DOCS_COMMITS" ]; then
+                          echo "## 📝 Documentation" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "$DOCS_COMMITS" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                        fi
+                        
+                        # Refactoring
+                        REFACTOR_COMMITS=$(git log "$commit_range" --pretty=format:"- %s (\`%h\`)" --grep="^refactor" 2>/dev/null || echo "")
+                        if [ -n "$REFACTOR_COMMITS" ]; then
+                          echo "## ♻️ Code Refactoring" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "$REFACTOR_COMMITS" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                        fi
+                        
+                        # Tests
+                        TEST_COMMITS=$(git log "$commit_range" --pretty=format:"- %s (\`%h\`)" --grep="^test" 2>/dev/null || echo "")
+                        if [ -n "$TEST_COMMITS" ]; then
+                          echo "## ✅ Tests" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "$TEST_COMMITS" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                        fi
+                        
+                        # CI/CD Changes
+                        CI_COMMITS=$(git log "$commit_range" --pretty=format:"- %s (\`%h\`)" --grep="^ci" 2>/dev/null || echo "")
+                        if [ -n "$CI_COMMITS" ]; then
+                          echo "## 👷 CI/CD" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "$CI_COMMITS" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                        fi
+                        
+                        # Build System
+                        BUILD_COMMITS=$(git log "$commit_range" --pretty=format:"- %s (\`%h\`)" --grep="^build" 2>/dev/null || echo "")
+                        if [ -n "$BUILD_COMMITS" ]; then
+                          echo "## 🔨 Build System" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "$BUILD_COMMITS" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                        fi
+                        
+                        # Chores
+                        CHORE_COMMITS=$(git log "$commit_range" --pretty=format:"- %s (\`%h\`)" --grep="^chore" 2>/dev/null || echo "")
+                        if [ -n "$CHORE_COMMITS" ]; then
+                          echo "## 🔧 Chores & Maintenance" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                          echo "$CHORE_COMMITS" >> "$CHANGELOG_FILE"
+                          echo "" >> "$CHANGELOG_FILE"
+                        fi
+                      }
+                      
+                      # Generate categorized changelog
+                      categorize_commits "$COMMIT_RANGE"
+                      
+                      # Enhanced Statistics
+                      cat >> "$CHANGELOG_FILE" << EOF
+                      ---
+                      
+                      ## 📊 Release Statistics
+                      
+                      EOF
+                      
+                      # Calculate statistics
+                      COMMIT_COUNT=$(git rev-list --count "$COMMIT_RANGE" 2>/dev/null || echo "0")
+                      FILES_CHANGED=$(git diff --shortstat "$COMMIT_RANGE" 2>/dev/null | awk '{print $1}' || echo "0")
+                      INSERTIONS=$(git diff --shortstat "$COMMIT_RANGE" 2>/dev/null | awk '{print $4}' || echo "0")
+                      DELETIONS=$(git diff --shortstat "$COMMIT_RANGE" 2>/dev/null | awk '{print $6}' || echo "0")
+                      
+                      # Commit type breakdown
+                      FEAT_COUNT=$(git log "$COMMIT_RANGE" --grep="^feat" --oneline 2>/dev/null | wc -l)
+                      FIX_COUNT=$(git log "$COMMIT_RANGE" --grep="^fix" --oneline 2>/dev/null | wc -l)
+                      DOCS_COUNT=$(git log "$COMMIT_RANGE" --grep="^docs" --oneline 2>/dev/null | wc -l)
+                      
+                      cat >> "$CHANGELOG_FILE" << EOF
+                      ### Code Changes
+                      - **Total Commits:** $COMMIT_COUNT
+                      - **Files Changed:** ${FILES_CHANGED:-0}
+                      - **Lines Added:** +${INSERTIONS:-0}
+                      - **Lines Deleted:** -${DELETIONS:-0}
+                      - **Net Change:** $((${INSERTIONS:-0} - ${DELETIONS:-0})) lines
+                      
+                      ### Commit Breakdown
+                      - 🚀 Features: $FEAT_COUNT
+                      - 🐛 Bug Fixes: $FIX_COUNT
+                      - 📝 Documentation: $DOCS_COUNT
+                      - 📦 Others: $((COMMIT_COUNT - FEAT_COUNT - FIX_COUNT - DOCS_COUNT))
+                      
+                      EOF
+                      
+                      # Top changed files
+                      echo "### 📁 Most Changed Files" >> "$CHANGELOG_FILE"
+                      echo "\`\`\`" >> "$CHANGELOG_FILE"
+                      git diff --stat "$COMMIT_RANGE" 2>/dev/null | head -10 >> "$CHANGELOG_FILE" || echo "No changes" >> "$CHANGELOG_FILE"
+                      echo "\`\`\`" >> "$CHANGELOG_FILE"
+                      echo "" >> "$CHANGELOG_FILE"
+                      
+                      # Dependencies
+                      DEPS_CHANGED=$(git diff --name-only "$COMMIT_RANGE" 2>/dev/null | grep -E "package.json|requirements.txt|go.mod|pom.xml|Cargo.toml" || echo "")
+                      if [ -n "$DEPS_CHANGED" ]; then
+                        echo "### 📦 Dependency Files Updated" >> "$CHANGELOG_FILE"
+                        echo "" >> "$CHANGELOG_FILE"
+                        echo "$DEPS_CHANGED" | while read -r file; do
+                          echo "- \`$file\`" >> "$CHANGELOG_FILE"
+                        done
+                        echo "" >> "$CHANGELOG_FILE"
+                      fi
+                      
+                      # Contributors
+                      CONTRIBUTOR_COUNT=$(git log "$COMMIT_RANGE" --format='%an' | sort -u | wc -l)
+                      
+                      cat >> "$CHANGELOG_FILE" << EOF
+                      
+                      ## 👥 Contributors
+                      
+                      **Total Contributors:** $CONTRIBUTOR_COUNT
+                      
+                      EOF
+                      
+                      git log "$COMMIT_RANGE" --format='%an|%ae' | sort -u | while IFS='|' read -r name email; do
+                        commits=$(git log "$COMMIT_RANGE" --author="$email" --oneline | wc -l)
+                        echo "- **$name** ($email) - $commits commit(s)" >> "$CHANGELOG_FILE"
+                      done
+                      
+                      # Issues and PRs
+                      echo "" >> "$CHANGELOG_FILE"
+                      echo "## 🎫 Linked Issues" >> "$CHANGELOG_FILE"
+                      echo "" >> "$CHANGELOG_FILE"
+                      
+                      ISSUES=$(git log "$COMMIT_RANGE" --format="%s %b" | grep -oE '(#[0-9]+|[A-Z]+-[0-9]+)' | sort -u || echo "")
+                      if [ -n "$ISSUES" ]; then
+                        echo "$ISSUES" | while read -r issue; do
+                          echo "- $issue" >> "$CHANGELOG_FILE"
+                        done
+                      else
+                        echo "_No linked issues found_" >> "$CHANGELOG_FILE"
+                      fi
+                      
+                      # Useful links
+                      cat >> "$CHANGELOG_FILE" << EOF
+                      
+                      
+                      ## 🔗 Useful Links
+                      
+                      - 🔍 [Compare Changes](<+codebase.repoUrl>/compare/${LATEST_RELEASE}...${CURRENT_VERSION})
+                      - 📦 [Repository](<+codebase.repoUrl>)
+                      - 🏷️ [This Release](<+codebase.repoUrl>/releases/tag/${CURRENT_VERSION})
+                      - 🚀 [Pipeline Execution](<+pipeline.execution.url>)
+                      
+                      EOF
+                      
+                      # Release cycle time
+                      if git rev-parse "$LATEST_RELEASE" >/dev/null 2>&1; then
+                        DAYS_SINCE=$(( ($(date +%s) - $(git log -1 --format=%at "$LATEST_RELEASE")) / 86400 ))
+                        cat >> "$CHANGELOG_FILE" << EOF
+                      ## ⏱️ Release Cycle
+                      
+                      - **Days Since Last Release:** $DAYS_SINCE days
+                      - **Commits Per Day:** $(echo "scale=1; $COMMIT_COUNT / $DAYS_SINCE" | bc 2>/dev/null || echo "N/A")
+                      
+                      EOF
+                      fi
+                      
+                      # Footer
+                      cat >> "$CHANGELOG_FILE" << EOF
+                      ---
+                      
+                      <sub>Generated by Harness Pipeline | $(date -u +"%Y-%m-%dT%H:%M:%SZ")</sub>
+                      EOF
+                      
+                      echo ""
+                      echo "✅ Changelog generated: $CHANGELOG_FILE"
+                      echo ""
+                      
+                      # Show preview
+                      echo "=========================================="
+                      echo "CHANGELOG PREVIEW:"
+                      echo "=========================================="
+                      head -50 "$CHANGELOG_FILE"
+                      echo "..."
+                      echo "=========================================="
+                      
+                      # Export for next steps
+                      export CHANGELOG_FILE
+                      export COMMIT_COUNT
