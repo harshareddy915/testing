@@ -1,0 +1,95 @@
+- step:
+                  type: Run
+                  name: Setup Tools
+                  identifier: setup_tools
+                  spec:
+                    connectorRef: <+input>
+                    image: alpine:latest
+                    shell: Sh
+                    command: |
+                      apk add --no-cache git curl bash
+                      
+                      # Install git-cliff (optional but recommended)
+                      curl -L https://github.com/orhun/git-cliff/releases/download/v1.4.0/git-cliff-1.4.0-x86_64-unknown-linux-musl.tar.gz | tar xz
+                      mv git-cliff-1.4.0/git-cliff /usr/local/bin/
+                      chmod +x /usr/local/bin/git-cliff
+                      
+                      echo "Tools installed successfully"
+
+              # Step 2: Generate Changelog with git-cliff
+              - step:
+                  type: Run
+                  name: Generate Changelog with git-cliff
+                  identifier: generate_changelog_gitcliff
+                  spec:
+                    connectorRef: <+input>
+                    image: alpine:latest
+                    shell: Bash
+                    command: |
+                      #!/bin/bash
+                      set -e
+                      
+                      VERSION="${RELEASE_VERSION:-v<+pipeline.sequenceId>.0.0}"
+                      
+                      echo "Generating changelog for version: $VERSION"
+                      
+                      # Create git-cliff configuration
+                      cat > cliff.toml << 'EOF'
+                      [changelog]
+                      header = """
+                      # Changelog\n
+                      All notable changes to this project will be documented in this file.\n
+                      """
+                      body = """
+                      {% if version %}\
+                          ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+                      {% else %}\
+                          ## [unreleased]
+                      {% endif %}\
+                      {% for group, commits in commits | group_by(attribute="group") %}
+                          ### {{ group | upper_first }}
+                          {% for commit in commits %}
+                              - {% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message | upper_first }}\
+                          {% endfor %}
+                      {% endfor %}\n
+                      """
+                      trim = true
+                      
+                      [git]
+                      conventional_commits = true
+                      filter_unconventional = false
+                      split_commits = false
+                      commit_parsers = [
+                          { message = "^feat", group = "Features"},
+                          { message = "^fix", group = "Bug Fixes"},
+                          { message = "^doc", group = "Documentation"},
+                          { message = "^perf", group = "Performance"},
+                          { message = "^refactor", group = "Refactor"},
+                          { message = "^style", group = "Styling"},
+                          { message = "^test", group = "Testing"},
+                          { message = "^chore\\(release\\): prepare for", skip = true},
+                          { message = "^chore", group = "Miscellaneous Tasks"},
+                          { body = ".*security", group = "Security"},
+                      ]
+                      protect_breaking_commits = false
+                      filter_commits = false
+                      tag_pattern = "v[0-9]*"
+                      ignore_tags = ""
+                      topo_order = false
+                      sort_commits = "oldest"
+                      EOF
+                      
+                      # Generate changelog
+                      git-cliff --tag $VERSION --output CHANGELOG.md
+                      
+                      # Also create version-specific changelog
+                      git-cliff --tag $VERSION --unreleased --output "CHANGELOG-${VERSION}.md"
+                      
+                      echo "Changelog generated successfully!"
+                      cat "CHANGELOG-${VERSION}.md"
+                      
+                      export CHANGELOG_VERSION=$VERSION
+                    envVariables:
+                      RELEASE_VERSION: <+pipeline.variables.RELEASE_VERSION>
+                    outputVariables:
+                      - name: CHANGELOG_VERSION
