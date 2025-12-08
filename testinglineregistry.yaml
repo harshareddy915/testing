@@ -1,0 +1,503 @@
+pipeline:
+  name: Register S3 Terraform Module
+  identifier: register_s3_terraform_module
+  projectIdentifier: <+project.identifier>
+  orgIdentifier: <+org.identifier>
+  tags:
+    module_type: terraform
+    service: s3
+    provider: aws
+  stages:
+    - stage:
+        name: Validate and Register S3 Module
+        identifier: validate_register_s3_module
+        description: Validates S3 Terraform module structure and registers with module registry
+        type: CI
+        spec:
+          cloning:
+            depth: 1
+            sslVerify: true
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: Setup Environment
+                  identifier: setup_environment
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "Setting up environment for S3 Terraform module registration"
+                      
+                      # Install required tools
+                      apt-get update
+                      apt-get install -y jq curl wget unzip
+                      
+                      # Install Terraform
+                      TERRAFORM_VERSION="1.9.8"
+                      wget -q https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip
+                      unzip -q terraform_${TERRAFORM_VERSION}_linux_amd64.zip
+                      mv terraform /usr/local/bin/
+                      rm terraform_${TERRAFORM_VERSION}_linux_amd64.zip
+                      
+                      terraform version
+                      
+                      # Install yq for YAML parsing
+                      wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+                      chmod +x /usr/local/bin/yq
+                      
+                      # Verify S3 module structure
+                      if [ ! -f "main.tf" ]; then
+                        echo "Error: main.tf not found - required for Terraform modules"
+                        exit 1
+                      fi
+                      
+                      if [ ! -f "variables.tf" ]; then
+                        echo "Warning: variables.tf not found (recommended)"
+                      fi
+                      
+                      if [ ! -f "outputs.tf" ]; then
+                        echo "Warning: outputs.tf not found (recommended)"
+                      fi
+                      
+                      echo "Environment setup complete"
+              
+              - step:
+                  type: Run
+                  name: Validate S3 Module Metadata
+                  identifier: validate_module_metadata
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "Validating S3 Terraform module metadata..."
+                      
+                      # Check if module.yaml exists, if not create from defaults
+                      if [ ! -f "module.yaml" ] && [ ! -f "module.yml" ]; then
+                        echo "No module.yaml found, creating default metadata file..."
+                        
+                        # Extract module name from directory or use default
+                        MODULE_NAME="${HARNESS_MODULE_NAME:-aws-s3-bucket}"
+                        MODULE_VERSION="${HARNESS_MODULE_VERSION:-1.0.0}"
+                        
+                        cat > module.yaml <<EOF
+                      name: ${MODULE_NAME}
+                      version: ${MODULE_VERSION}
+                      description: AWS S3 Bucket Terraform Module
+                      author: DevOps Team
+                      type: terraform
+                      
+                      metadata:
+                        category: storage
+                        provider: aws
+                        service: s3
+                        tags:
+                          - s3
+                          - storage
+                          - aws
+                      
+                      dependencies:
+                        terraform: ">=1.0.0"
+                      
+                      providers:
+                        - name: aws
+                          version: "~> 5.0"
+                      EOF
+                        echo "Created module.yaml with default S3 metadata"
+                      fi
+                      
+                      # Determine module file name
+                      if [ -f "module.yaml" ]; then
+                        MODULE_FILE="module.yaml"
+                      else
+                        MODULE_FILE="module.yml"
+                      fi
+                      
+                      # Extract and validate required fields
+                      MODULE_NAME=$(yq eval '.name' $MODULE_FILE)
+                      MODULE_VERSION=$(yq eval '.version' $MODULE_FILE)
+                      MODULE_DESCRIPTION=$(yq eval '.description' $MODULE_FILE)
+                      MODULE_TYPE=$(yq eval '.type' $MODULE_FILE)
+                      
+                      if [ -z "$MODULE_NAME" ] || [ "$MODULE_NAME" = "null" ]; then
+                        echo "Error: Module name is required"
+                        exit 1
+                      fi
+                      
+                      if [ -z "$MODULE_VERSION" ] || [ "$MODULE_VERSION" = "null" ]; then
+                        echo "Error: Module version is required"
+                        exit 1
+                      fi
+                      
+                      if [ "$MODULE_TYPE" != "terraform" ]; then
+                        echo "Warning: Module type is not 'terraform', setting to terraform"
+                        MODULE_TYPE="terraform"
+                      fi
+                      
+                      echo "Module Name: $MODULE_NAME"
+                      echo "Module Version: $MODULE_VERSION"
+                      echo "Module Type: $MODULE_TYPE"
+                      echo "Module Description: $MODULE_DESCRIPTION"
+                      
+                      # Export for next steps
+                      echo "export MODULE_NAME=\"$MODULE_NAME\"" >> /harness/env
+                      echo "export MODULE_VERSION=\"$MODULE_VERSION\"" >> /harness/env
+                      echo "export MODULE_TYPE=\"$MODULE_TYPE\"" >> /harness/env
+                      
+                      echo "S3 Module metadata validation complete"
+                  envVariables:
+                    HARNESS_MODULE_NAME: <+pipeline.variables.module_name>
+                    HARNESS_MODULE_VERSION: <+pipeline.variables.module_version>
+              
+              - step:
+                  type: Run
+                  name: Validate S3 Terraform Structure
+                  identifier: validate_module_structure
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "Validating S3 Terraform module structure..."
+                      
+                      # Check for required Terraform files
+                      REQUIRED_FILES=("main.tf")
+                      RECOMMENDED_FILES=("variables.tf" "outputs.tf" "README.md" "versions.tf")
+                      
+                      for file in "${REQUIRED_FILES[@]}"; do
+                        if [ ! -f "$file" ]; then
+                          echo "Error: $file is required for Terraform modules"
+                          exit 1
+                        else
+                          echo "✓ Found required file: $file"
+                        fi
+                      done
+                      
+                      for file in "${RECOMMENDED_FILES[@]}"; do
+                        if [ ! -f "$file" ]; then
+                          echo "⚠ Warning: $file not found (recommended)"
+                        else
+                          echo "✓ Found recommended file: $file"
+                        fi
+                      done
+                      
+                      # Validate Terraform syntax
+                      echo ""
+                      echo "Running Terraform validation..."
+                      terraform init -backend=false
+                      terraform validate
+                      
+                      if [ $? -eq 0 ]; then
+                        echo "✓ Terraform validation passed"
+                      else
+                        echo "✗ Terraform validation failed"
+                        exit 1
+                      fi
+                      
+                      # Check for S3 bucket resource in Terraform files
+                      echo ""
+                      echo "Checking for S3 resources..."
+                      if grep -rq "aws_s3_bucket" *.tf 2>/dev/null; then
+                        echo "✓ Found S3 bucket resource declaration"
+                      else
+                        echo "⚠ Warning: No S3 bucket resource found in Terraform files"
+                      fi
+                      
+                      # Check for examples directory
+                      if [ -d "examples" ]; then
+                        echo "✓ Found examples directory"
+                      else
+                        echo "⚠ Warning: examples/ directory not found (recommended for module usage examples)"
+                      fi
+                      
+                      echo ""
+                      echo "S3 Terraform module structure validation complete"
+              
+              - step:
+                  type: Run
+                  name: Package S3 Terraform Module
+                  identifier: package_module
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "Packaging S3 Terraform module..."
+                      
+                      source /harness/env
+                      
+                      # Create package directory
+                      mkdir -p /harness/module-package
+                      
+                      # List files to be packaged
+                      echo "Files to be packaged:"
+                      find . -type f \
+                        ! -path "./.git/*" \
+                        ! -path "./.terraform/*" \
+                        ! -path "./node_modules/*" \
+                        ! -name "*.tfstate*" \
+                        ! -name ".terraform.lock.hcl" \
+                        -exec ls -lh {} \;
+                      
+                      # Create tarball of Terraform module contents
+                      tar -czf "/harness/module-package/${MODULE_NAME}-${MODULE_VERSION}.tar.gz" \
+                        --exclude='.git' \
+                        --exclude='node_modules' \
+                        --exclude='.terraform' \
+                        --exclude='*.tfstate*' \
+                        --exclude='.terraform.lock.hcl' \
+                        --exclude='terraform.tfstate.d' \
+                        .
+                      
+                      echo ""
+                      echo "✓ S3 Terraform module packaged successfully"
+                      echo "Package details:"
+                      ls -lh "/harness/module-package/"
+                      
+                      # Verify package contents
+                      echo ""
+                      echo "Package contents:"
+                      tar -tzf "/harness/module-package/${MODULE_NAME}-${MODULE_VERSION}.tar.gz" | head -20
+              
+              - step:
+                  type: Run
+                  name: Register S3 Module with Registry
+                  identifier: register_module_registry
+                  spec:
+                    shell: Bash
+                    envVariables:
+                      HARNESS_ACCOUNT_ID: <+account.identifier>
+                      HARNESS_ORG_ID: <+org.identifier>
+                      HARNESS_PROJECT_ID: <+project.identifier>
+                      HARNESS_API_KEY: <+secrets.getValue("harness_api_key")>
+                      HARNESS_PLATFORM_URL: <+variable.harness_platform_url>
+                    command: |
+                      echo "Registering S3 Terraform module with Harness Module Registry..."
+                      
+                      source /harness/env
+                      
+                      # Prepare S3 module registration payload
+                      cat > /tmp/module-registration.json <<EOF
+                      {
+                        "name": "${MODULE_NAME}",
+                        "version": "${MODULE_VERSION}",
+                        "description": "AWS S3 Terraform Module - Manages S3 bucket configuration and policies",
+                        "type": "terraform",
+                        "provider": "aws",
+                        "service": "s3",
+                        "org": "${HARNESS_ORG_ID}",
+                        "project": "${HARNESS_PROJECT_ID}",
+                        "tags": ["s3", "storage", "aws", "terraform"],
+                        "metadata": {
+                          "terraform_version": ">=1.0.0",
+                          "aws_provider_version": "~> 5.0",
+                          "category": "storage"
+                        }
+                      }
+                      EOF
+                      
+                      echo "Registration payload:"
+                      cat /tmp/module-registration.json | jq '.'
+                      
+                      # Register module via API
+                      echo ""
+                      echo "Calling Harness API to register module..."
+                      RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+                        "${HARNESS_PLATFORM_URL}/gateway/iacm/api/orgs/${HARNESS_ORG_ID}/projects/${HARNESS_PROJECT_ID}/modules" \
+                        -H "x-api-key: ${HARNESS_API_KEY}" \
+                        -H "Content-Type: application/json" \
+                        -H "Harness-Account: ${HARNESS_ACCOUNT_ID}" \
+                        -d @/tmp/module-registration.json)
+                      
+                      HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+                      RESPONSE_BODY=$(echo "$RESPONSE" | sed '$d')
+                      
+                      echo "HTTP Status Code: $HTTP_CODE"
+                      echo "Registration response:"
+                      echo "$RESPONSE_BODY" | jq '.' 2>/dev/null || echo "$RESPONSE_BODY"
+                      
+                      # Check if registration was successful
+                      if echo "$RESPONSE_BODY" | jq -e '.id' > /dev/null 2>&1; then
+                        MODULE_ID=$(echo "$RESPONSE_BODY" | jq -r '.id')
+                        echo ""
+                        echo "✓ S3 Module registered successfully with ID: $MODULE_ID"
+                        echo "export MODULE_ID=\"$MODULE_ID\"" >> /harness/env
+                      elif [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+                        # Try alternative ID field names
+                        MODULE_ID=$(echo "$RESPONSE_BODY" | jq -r '.module_id // .moduleId // .identifier' 2>/dev/null)
+                        if [ -n "$MODULE_ID" ] && [ "$MODULE_ID" != "null" ]; then
+                          echo ""
+                          echo "✓ S3 Module registered successfully with ID: $MODULE_ID"
+                          echo "export MODULE_ID=\"$MODULE_ID\"" >> /harness/env
+                        else
+                          echo "✓ Module registration returned success but ID format unclear"
+                          echo "export MODULE_ID=\"${MODULE_NAME}\"" >> /harness/env
+                        fi
+                      else
+                        echo ""
+                        echo "✗ Error: S3 Module registration failed"
+                        exit 1
+                      fi
+              
+              - step:
+                  type: Run
+                  name: Upload S3 Module Package
+                  identifier: upload_module_package
+                  spec:
+                    shell: Bash
+                    envVariables:
+                      HARNESS_ACCOUNT_ID: <+account.identifier>
+                      HARNESS_ORG_ID: <+org.identifier>
+                      HARNESS_PROJECT_ID: <+project.identifier>
+                      HARNESS_API_KEY: <+secrets.getValue("harness_api_key")>
+                      HARNESS_PLATFORM_URL: <+variable.harness_platform_url>
+                    command: |
+                      echo "Uploading S3 Terraform module package..."
+                      
+                      source /harness/env
+                      
+                      PACKAGE_PATH="/harness/module-package/${MODULE_NAME}-${MODULE_VERSION}.tar.gz"
+                      
+                      if [ ! -f "$PACKAGE_PATH" ]; then
+                        echo "✗ Error: Package file not found at $PACKAGE_PATH"
+                        exit 1
+                      fi
+                      
+                      echo "Package size: $(du -h $PACKAGE_PATH | cut -f1)"
+                      echo "Uploading to module ID: $MODULE_ID"
+                      echo ""
+                      
+                      # Upload module package
+                      RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+                        "${HARNESS_PLATFORM_URL}/gateway/iacm/api/orgs/${HARNESS_ORG_ID}/projects/${HARNESS_PROJECT_ID}/modules/${MODULE_ID}/versions/${MODULE_VERSION}/upload" \
+                        -H "x-api-key: ${HARNESS_API_KEY}" \
+                        -H "Harness-Account: ${HARNESS_ACCOUNT_ID}" \
+                        -F "file=@${PACKAGE_PATH}")
+                      
+                      HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+                      RESPONSE_BODY=$(echo "$RESPONSE" | sed '$d')
+                      
+                      echo "HTTP Status Code: $HTTP_CODE"
+                      echo "Upload response:"
+                      echo "$RESPONSE_BODY" | jq '.' 2>/dev/null || echo "$RESPONSE_BODY"
+                      
+                      if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ]; then
+                        echo ""
+                        echo "✓ S3 module package uploaded successfully"
+                      elif echo "$RESPONSE_BODY" | grep -qi "success\|uploaded\|complete"; then
+                        echo ""
+                        echo "✓ S3 module package uploaded successfully"
+                      else
+                        echo ""
+                        echo "⚠ Warning: Upload response unclear (HTTP $HTTP_CODE)"
+                        echo "Please verify module upload in Harness UI"
+                      fi
+              
+              - step:
+                  type: Run
+                  name: Verify S3 Module Registration
+                  identifier: verify_registration
+                  spec:
+                    shell: Bash
+                    envVariables:
+                      HARNESS_ACCOUNT_ID: <+account.identifier>
+                      HARNESS_ORG_ID: <+org.identifier>
+                      HARNESS_PROJECT_ID: <+project.identifier>
+                      HARNESS_API_KEY: <+secrets.getValue("harness_api_key")>
+                      HARNESS_PLATFORM_URL: <+variable.harness_platform_url>
+                    command: |
+                      echo "Verifying S3 module registration in Harness Module Registry..."
+                      echo ""
+                      
+                      source /harness/env
+                      
+                      # Query module registry
+                      RESPONSE=$(curl -s -w "\n%{http_code}" -X GET \
+                        "${HARNESS_PLATFORM_URL}/gateway/iacm/api/orgs/${HARNESS_ORG_ID}/projects/${HARNESS_PROJECT_ID}/modules/${MODULE_ID}" \
+                        -H "x-api-key: ${HARNESS_API_KEY}" \
+                        -H "Harness-Account: ${HARNESS_ACCOUNT_ID}")
+                      
+                      HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+                      RESPONSE_BODY=$(echo "$RESPONSE" | sed '$d')
+                      
+                      echo "HTTP Status Code: $HTTP_CODE"
+                      
+                      if [ "$HTTP_CODE" = "200" ]; then
+                        echo ""
+                        echo "S3 Module details:"
+                        echo "$RESPONSE_BODY" | jq '.' 2>/dev/null || echo "$RESPONSE_BODY"
+                        
+                        # Verify version exists
+                        VERSION_CHECK=$(echo "$RESPONSE_BODY" | jq -r ".versions[]? | select(.version==\"${MODULE_VERSION}\")" 2>/dev/null)
+                        
+                        echo ""
+                        echo "=========================================="
+                        echo "S3 Module Registration Summary"
+                        echo "=========================================="
+                        echo "Module Name: $MODULE_NAME"
+                        echo "Module Version: $MODULE_VERSION"
+                        echo "Module ID: $MODULE_ID"
+                        echo "Module Type: Terraform"
+                        echo "Provider: AWS"
+                        echo "Service: S3"
+                        echo ""
+                        
+                        if [ -n "$VERSION_CHECK" ]; then
+                          echo "✓ Module version ${MODULE_VERSION} successfully registered"
+                          echo "✓ S3 module can now be used in Harness IACM workspaces"
+                          echo ""
+                          echo "Usage Example:"
+                          echo "----------------------------------------"
+                          echo "module \"s3_bucket\" {"
+                          echo "  source  = \"harness.io/${HARNESS_ORG_ID}/${HARNESS_PROJECT_ID}/${MODULE_NAME}\""
+                          echo "  version = \"${MODULE_VERSION}\""
+                          echo ""
+                          echo "  # Add your S3 configuration here"
+                          echo "  bucket_name = \"my-s3-bucket\""
+                          echo "}"
+                          echo "----------------------------------------"
+                        else
+                          echo "⚠ Module registered but version ${MODULE_VERSION} not found in versions list"
+                          echo "⚠ This may indicate the upload is still processing"
+                        fi
+                      else
+                        echo "✗ Error: Failed to verify module registration (HTTP $HTTP_CODE)"
+                        echo "Response: $RESPONSE_BODY"
+                        exit 1
+                      fi
+          caching:
+            enabled: false
+        variables:
+          - name: harness_platform_url
+            type: String
+            description: Harness Platform URL
+            required: true
+            value: https://app.harness.io
+  variables:
+    - name: module_name
+      type: String
+      description: Name of the S3 Terraform module
+      required: false
+      value: aws-s3-bucket
+    - name: module_version
+      type: String
+      description: Version of the module (semantic versioning)
+      required: false
+      value: "1.0.0"
+    - name: module_source_repo
+      type: String
+      description: Git repository containing the S3 Terraform module
+      required: false
+      value: ""
+  notificationRules:
+    - name: Module Registration Notification
+      identifier: module_registration_notification
+      pipelineEvents:
+        - type: AllEvents
+      notificationMethod:
+        type: Email
+        spec:
+          userGroups: []
+          recipients:
+            - <+pipeline.triggeredBy.email>
+      enabled: true
