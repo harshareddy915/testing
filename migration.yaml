@@ -1,0 +1,287 @@
+pipeline:
+  name: Migrate Pipelines and Templates
+  identifier: migrate_pipelines_templates
+  projectIdentifier: <your_project_id>
+  orgIdentifier: <your_org_id>
+  tags: {}
+  stages:
+    - stage:
+        name: Export from App Tenant
+        identifier: export_from_app
+        description: Export pipelines and templates from app tenant
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: ShellScript
+                  name: Export Pipelines
+                  identifier: export_pipelines
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          set -e
+                          
+                          # Configuration
+                          SOURCE_ACCOUNT="app"
+                          SOURCE_API_KEY="<+secrets.getValue("app_tenant_api_key")>"
+                          HARNESS_API_URL="https://app.harness.io/gateway/ng/api"
+                          ORG_ID="<+pipeline.variables.source_org_id>"
+                          PROJECT_ID="<+pipeline.variables.source_project_id>"
+                          
+                          # Create export directory
+                          mkdir -p /tmp/harness_export/pipelines
+                          
+                          # Export all pipelines
+                          echo "Fetching pipelines from source tenant..."
+                          curl -X GET \
+                            "${HARNESS_API_URL}/pipelines/list?accountIdentifier=${SOURCE_ACCOUNT}&orgIdentifier=${ORG_ID}&projectIdentifier=${PROJECT_ID}&page=0&size=100" \
+                            -H "x-api-key: ${SOURCE_API_KEY}" \
+                            -H "Content-Type: application/json" \
+                            -o /tmp/harness_export/pipelines_list.json
+                          
+                          # Parse and export individual pipelines
+                          pipeline_ids=$(cat /tmp/harness_export/pipelines_list.json | jq -r '.data.content[].identifier')
+                          
+                          for pipeline_id in $pipeline_ids; do
+                            echo "Exporting pipeline: ${pipeline_id}"
+                            curl -X GET \
+                              "${HARNESS_API_URL}/pipelines/${pipeline_id}?accountIdentifier=${SOURCE_ACCOUNT}&orgIdentifier=${ORG_ID}&projectIdentifier=${PROJECT_ID}" \
+                              -H "x-api-key: ${SOURCE_API_KEY}" \
+                              -H "Content-Type: application/json" \
+                              -o "/tmp/harness_export/pipelines/${pipeline_id}.json"
+                          done
+                          
+                          echo "Exported $(echo $pipeline_ids | wc -w) pipelines"
+                    environmentVariables: []
+                    outputVariables:
+                      - name: export_path
+                        type: String
+                        value: /tmp/harness_export/pipelines
+                  timeout: 10m
+              
+              - step:
+                  type: ShellScript
+                  name: Export Templates
+                  identifier: export_templates
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          set -e
+                          
+                          # Configuration
+                          SOURCE_ACCOUNT="app"
+                          SOURCE_API_KEY="<+secrets.getValue("app_tenant_api_key")>"
+                          HARNESS_API_URL="https://app.harness.io/gateway/ng/api"
+                          ORG_ID="<+pipeline.variables.source_org_id>"
+                          PROJECT_ID="<+pipeline.variables.source_project_id>"
+                          
+                          # Create export directory
+                          mkdir -p /tmp/harness_export/templates
+                          
+                          # Export Pipeline Templates
+                          echo "Fetching pipeline templates from source tenant..."
+                          curl -X POST \
+                            "${HARNESS_API_URL}/templates/list?accountIdentifier=${SOURCE_ACCOUNT}&orgIdentifier=${ORG_ID}&projectIdentifier=${PROJECT_ID}&page=0&size=100" \
+                            -H "x-api-key: ${SOURCE_API_KEY}" \
+                            -H "Content-Type: application/json" \
+                            -d '{"filterType": "Template", "templateEntityTypes": ["Pipeline", "Stage", "Step"]}' \
+                            -o /tmp/harness_export/templates_list.json
+                          
+                          # Parse and export individual templates
+                          template_ids=$(cat /tmp/harness_export/templates_list.json | jq -r '.data.content[].identifier')
+                          
+                          for template_id in $template_ids; do
+                            echo "Exporting template: ${template_id}"
+                            
+                            # Get template type
+                            template_type=$(cat /tmp/harness_export/templates_list.json | jq -r ".data.content[] | select(.identifier==\"${template_id}\") | .templateEntityType")
+                            version=$(cat /tmp/harness_export/templates_list.json | jq -r ".data.content[] | select(.identifier==\"${template_id}\") | .versionLabel")
+                            
+                            curl -X GET \
+                              "${HARNESS_API_URL}/templates/${template_id}?accountIdentifier=${SOURCE_ACCOUNT}&orgIdentifier=${ORG_ID}&projectIdentifier=${PROJECT_ID}&versionLabel=${version}" \
+                              -H "x-api-key: ${SOURCE_API_KEY}" \
+                              -H "Content-Type: application/json" \
+                              -o "/tmp/harness_export/templates/${template_id}.json"
+                          done
+                          
+                          echo "Exported $(echo $template_ids | wc -w) templates"
+                    environmentVariables: []
+                  timeout: 10m
+        tags: {}
+    
+    - stage:
+        name: Import to App3 Tenant
+        identifier: import_to_app3
+        description: Import pipelines and templates to app3 tenant
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: ShellScript
+                  name: Import Pipelines
+                  identifier: import_pipelines
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          set -e
+                          
+                          # Configuration
+                          TARGET_ACCOUNT="app3"
+                          TARGET_API_KEY="<+secrets.getValue("app3_tenant_api_key")>"
+                          HARNESS_API_URL="https://app.harness.io/gateway/ng/api"
+                          TARGET_ORG_ID="<+pipeline.variables.target_org_id>"
+                          TARGET_PROJECT_ID="<+pipeline.variables.target_project_id>"
+                          
+                          # Import pipelines
+                          for pipeline_file in /tmp/harness_export/pipelines/*.json; do
+                            if [ -f "$pipeline_file" ]; then
+                              pipeline_id=$(basename "$pipeline_file" .json)
+                              echo "Importing pipeline: ${pipeline_id}"
+                              
+                              # Extract pipeline YAML from JSON response
+                              pipeline_yaml=$(cat "$pipeline_file" | jq -r '.data.yamlPipeline')
+                              
+                              # Update org and project identifiers in YAML if needed
+                              updated_yaml=$(echo "$pipeline_yaml" | sed "s/orgIdentifier: .*/orgIdentifier: ${TARGET_ORG_ID}/" | sed "s/projectIdentifier: .*/projectIdentifier: ${TARGET_PROJECT_ID}/")
+                              
+                              # Create import payload
+                              cat > /tmp/pipeline_import.json <<EOF
+                          {
+                            "identifier": "${pipeline_id}",
+                            "orgIdentifier": "${TARGET_ORG_ID}",
+                            "projectIdentifier": "${TARGET_PROJECT_ID}"
+                          }
+                          EOF
+                              
+                              # Import pipeline
+                              response=$(curl -X POST \
+                                "${HARNESS_API_URL}/pipelines?accountIdentifier=${TARGET_ACCOUNT}" \
+                                -H "x-api-key: ${TARGET_API_KEY}" \
+                                -H "Content-Type: application/yaml" \
+                                --data-binary "$updated_yaml" \
+                                -w "\n%{http_code}" -s)
+                              
+                              http_code=$(echo "$response" | tail -n1)
+                              
+                              if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+                                echo "✓ Successfully imported pipeline: ${pipeline_id}"
+                              else
+                                echo "✗ Failed to import pipeline: ${pipeline_id} (HTTP ${http_code})"
+                                echo "$response"
+                              fi
+                            fi
+                          done
+                    environmentVariables: []
+                  timeout: 10m
+              
+              - step:
+                  type: ShellScript
+                  name: Import Templates
+                  identifier: import_templates
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          set -e
+                          
+                          # Configuration
+                          TARGET_ACCOUNT="app3"
+                          TARGET_API_KEY="<+secrets.getValue("app3_tenant_api_key")>"
+                          HARNESS_API_URL="https://app.harness.io/gateway/ng/api"
+                          TARGET_ORG_ID="<+pipeline.variables.target_org_id>"
+                          TARGET_PROJECT_ID="<+pipeline.variables.target_project_id>"
+                          
+                          # Import templates
+                          for template_file in /tmp/harness_export/templates/*.json; do
+                            if [ -f "$template_file" ]; then
+                              template_id=$(basename "$template_file" .json)
+                              echo "Importing template: ${template_id}"
+                              
+                              # Extract template YAML from JSON response
+                              template_yaml=$(cat "$template_file" | jq -r '.data.yaml')
+                              
+                              # Update org and project identifiers in YAML
+                              updated_yaml=$(echo "$template_yaml" | sed "s/orgIdentifier: .*/orgIdentifier: ${TARGET_ORG_ID}/" | sed "s/projectIdentifier: .*/projectIdentifier: ${TARGET_PROJECT_ID}/")
+                              
+                              # Import template
+                              response=$(curl -X POST \
+                                "${HARNESS_API_URL}/templates?accountIdentifier=${TARGET_ACCOUNT}" \
+                                -H "x-api-key: ${TARGET_API_KEY}" \
+                                -H "Content-Type: application/yaml" \
+                                --data-binary "$updated_yaml" \
+                                -w "\n%{http_code}" -s)
+                              
+                              http_code=$(echo "$response" | tail -n1)
+                              
+                              if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+                                echo "✓ Successfully imported template: ${template_id}"
+                              else
+                                echo "✗ Failed to import template: ${template_id} (HTTP ${http_code})"
+                                echo "$response"
+                              fi
+                            fi
+                          done
+                    environmentVariables: []
+                  timeout: 10m
+              
+              - step:
+                  type: ShellScript
+                  name: Cleanup Export Files
+                  identifier: cleanup
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          #!/bin/bash
+                          echo "Cleaning up temporary files..."
+                          rm -rf /tmp/harness_export
+                          echo "Cleanup complete"
+                    environmentVariables: []
+                  timeout: 1m
+        tags: {}
+  
+  variables:
+    - name: source_org_id
+      type: String
+      description: Source organization identifier in app tenant
+      required: true
+      value: <+input>
+    - name: source_project_id
+      type: String
+      description: Source project identifier in app tenant
+      required: true
+      value: <+input>
+    - name: target_org_id
+      type: String
+      description: Target organization identifier in app3 tenant
+      required: true
+      value: <+input>
+    - name: target_project_id
+      type: String
+      description: Target project identifier in app3 tenant
+      required: true
+      value: <+input>
