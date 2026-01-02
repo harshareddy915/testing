@@ -1,6 +1,6 @@
 #!/bin/bash
 # Setup script to install Flyway, Java, IAM Authenticator, and PostgreSQL client
-# This script is designed for Alpine Linux systems
+# This script is designed for Alpine Linux systems with SSL workaround
 set -e  # Exit on any error
 
 echo "=========================================="
@@ -9,12 +9,19 @@ echo "=========================================="
 
 # Update package lists
 echo ""
-echo "[1/5] Updating package lists..."
+echo "[1/7] Updating package lists..."
 apk update
+
+# Install CA certificates and OpenSSL
+echo ""
+echo "[2/7] Installing CA certificates and OpenSSL..."
+apk add --no-cache ca-certificates ca-certificates-bundle openssl wget curl bash
+update-ca-certificates
+echo "Certificates installed"
 
 # Install Java (OpenJDK 17)
 echo ""
-echo "[2/5] Installing Java (OpenJDK 17)..."
+echo "[3/7] Installing Java (OpenJDK 17)..."
 if ! command -v java &> /dev/null; then
     apk add --no-cache openjdk17 openjdk17-jre
     echo "Java installed successfully"
@@ -25,7 +32,7 @@ java -version
 
 # Install PostgreSQL client (psql)
 echo ""
-echo "[3/5] Installing PostgreSQL client (psql)..."
+echo "[4/7] Installing PostgreSQL client (psql)..."
 if ! command -v psql &> /dev/null; then
     apk add --no-cache postgresql-client
     echo "PostgreSQL client installed successfully"
@@ -34,29 +41,58 @@ else
 fi
 psql --version
 
-# Install required dependencies for Flyway
-echo ""
-echo "[4/5] Installing dependencies (bash, wget, curl)..."
-apk add --no-cache bash wget curl
-
 # Install Flyway
 echo ""
-echo "[5/5] Installing Flyway..."
+echo "[5/7] Installing Flyway..."
 if ! command -v flyway &> /dev/null; then
     FLYWAY_VERSION="10.21.0"
+    FLYWAY_URL="https://repo1.maven.org/maven2/org/flywaydb/flyway-commandline/${FLYWAY_VERSION}/flyway-commandline-${FLYWAY_VERSION}-linux-x64.tar.gz"
     echo "Downloading Flyway version ${FLYWAY_VERSION}..."
     
-    # Download and extract Flyway
     cd /tmp
-    wget -q https://repo1.maven.org/maven2/org/flywaydb/flyway-commandline/${FLYWAY_VERSION}/flyway-commandline-${FLYWAY_VERSION}-linux-x64.tar.gz
-    tar -xzf flyway-commandline-${FLYWAY_VERSION}-linux-x64.tar.gz
+    
+    # Method 1: Try curl with full SSL verification
+    echo "Attempting download with curl (secure)..."
+    if curl -fsSL --connect-timeout 30 -o flyway-commandline.tar.gz "$FLYWAY_URL" 2>/dev/null; then
+        echo "✓ Downloaded successfully with secure connection"
+    # Method 2: Try curl with insecure flag as fallback
+    elif curl -fsSLk --connect-timeout 30 -o flyway-commandline.tar.gz "$FLYWAY_URL" 2>/dev/null; then
+        echo "✓ Downloaded with insecure mode (SSL verification bypassed)"
+    # Method 3: Try wget with insecure flag
+    elif wget --no-check-certificate --timeout=30 -O flyway-commandline.tar.gz "$FLYWAY_URL" 2>/dev/null; then
+        echo "✓ Downloaded with wget (SSL verification bypassed)"
+    else
+        echo "✗ All download methods failed"
+        echo ""
+        echo "Debugging information:"
+        echo "====================="
+        echo "Testing basic connectivity..."
+        ping -c 2 8.8.8.8 || echo "No internet connection"
+        echo ""
+        echo "Testing DNS resolution..."
+        nslookup repo1.maven.org || echo "DNS resolution failed"
+        echo ""
+        echo "Testing SSL connection..."
+        openssl s_client -connect repo1.maven.org:443 -brief 2>&1 | head -10 || echo "SSL connection failed"
+        exit 1
+    fi
+    
+    # Verify download
+    if [ ! -f flyway-commandline.tar.gz ] || [ ! -s flyway-commandline.tar.gz ]; then
+        echo "Error: Downloaded file is missing or empty"
+        exit 1
+    fi
+    
+    # Extract Flyway
+    echo "Extracting Flyway..."
+    tar -xzf flyway-commandline.tar.gz
     
     # Move to /opt and create symlink
     mv flyway-${FLYWAY_VERSION} /opt/flyway
     ln -sf /opt/flyway/flyway /usr/local/bin/flyway
     
     # Clean up
-    rm flyway-commandline-${FLYWAY_VERSION}-linux-x64.tar.gz
+    rm flyway-commandline.tar.gz
     
     echo "Flyway installed successfully"
 else
@@ -66,7 +102,7 @@ flyway -v
 
 # Install AWS IAM Authenticator
 echo ""
-echo "[6/6] Installing AWS IAM Authenticator..."
+echo "[6/7] Installing AWS IAM Authenticator..."
 if ! command -v aws-iam-authenticator &> /dev/null; then
     echo "Downloading AWS IAM Authenticator..."
     
@@ -81,8 +117,16 @@ if ! command -v aws-iam-authenticator &> /dev/null; then
         exit 1
     fi
     
-    # Download and install
-    curl -o /tmp/aws-iam-authenticator "$IAM_AUTH_URL"
+    # Download with fallback
+    if curl -fsSL --connect-timeout 30 -o /tmp/aws-iam-authenticator "$IAM_AUTH_URL" 2>/dev/null; then
+        echo "✓ Downloaded successfully"
+    elif curl -fsSLk --connect-timeout 30 -o /tmp/aws-iam-authenticator "$IAM_AUTH_URL" 2>/dev/null; then
+        echo "✓ Downloaded with insecure mode"
+    else
+        echo "✗ Failed to download AWS IAM Authenticator"
+        exit 1
+    fi
+    
     chmod +x /tmp/aws-iam-authenticator
     mv /tmp/aws-iam-authenticator /usr/local/bin/
     
